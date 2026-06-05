@@ -113,36 +113,39 @@ export async function POST(req: Request) {
       },
     });
 
-    const history: DbChatMessage[] = await prisma.chatMessage.findMany({
-      where: {
-        sessionId: chatSession.id,
-      },
-      select: {
-        role: true,
-        content: true,
-      },
-      orderBy: {
-        createdAt: "asc",
-      },
-      take: 20,
-    });
+    type DbChatMessage = {
+  role: "USER" | "ASSISTANT" | "SYSTEM";
+  content: string;
+};
 
-    const aiMessages: AiMessage[] = history.map((item: DbChatMessage) => {
-      let role: AiMessage["role"] = "system";
+type AiChatMessage = {
+  role: "user" | "assistant" | "system";
+  content: string;
+};
 
-      if (item.role === "USER") {
-        role = "user";
-      }
+const history: DbChatMessage[] = await prisma.chatMessage.findMany({
+  where: {
+    sessionId: chatSession.id,
+  },
+  select: {
+    role: true,
+    content: true,
+  },
+  orderBy: {
+    createdAt: "asc",
+  },
+  take: 20,
+});
 
-      if (item.role === "ASSISTANT") {
-        role = "assistant";
-      }
-
-      return {
-        role,
-        content: item.content,
-      };
-    });
+const aiMessages: AiChatMessage[] = history.map((item: DbChatMessage) => ({
+  role:
+    item.role === "USER"
+      ? "user"
+      : item.role === "ASSISTANT"
+        ? "assistant"
+        : "system",
+  content: item.content,
+}));
 
     const result = await generateText({
       model: google("gemini-2.5-flash"),
