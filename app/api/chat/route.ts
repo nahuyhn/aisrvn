@@ -55,7 +55,10 @@ export async function POST(req: Request) {
       );
     }
 
-    let chatSession = null;
+    let chatSession:
+  | Awaited<ReturnType<typeof prisma.chatSession.findFirst>>
+  | Awaited<ReturnType<typeof prisma.chatSession.create>>
+  | null = null;
 
     if (sessionId) {
       chatSession = await prisma.chatSession.findFirst({
@@ -100,15 +103,16 @@ export async function POST(req: Request) {
       },
     });
 
-    const history = await prisma.chatMessage.findMany({
-      where: {
-        sessionId: chatSession.id,
-      },
-      orderBy: {
-        createdAt: "asc",
-      },
-      take: 20,
-    });
+    const history: Awaited<ReturnType<typeof prisma.chatMessage.findMany>> =
+  await prisma.chatMessage.findMany({
+    where: {
+      sessionId: chatSession.id,
+    },
+    orderBy: {
+      createdAt: "asc",
+    },
+    take: 20,
+  });
 
     const aiMessages = history.map((item) => ({
       role:
