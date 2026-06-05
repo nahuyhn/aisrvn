@@ -1,0 +1,156 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  BANNED
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+model User {
+  id     String     @id @default(cuid())
+  name   String?
+  email  String     @unique
+  image  String?
+  role   UserRole   @default(USER)
+  status UserStatus @default(ACTIVE)
+
+  orders        Order[]
+  subscriptions Subscription[]
+  chatSessions  ChatSession[]
+  usageLogs     UsageLog[]
+  projects      Project[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Plan {
+  id                 String  @id @default(cuid())
+  name               String  @unique
+  price              Int
+  durationDays       Int
+  messageLimitPerDay Int
+  isActive           Boolean @default(true)
+
+  orders        Order[]
+  subscriptions Subscription[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Order {
+  id            String      @id @default(cuid())
+  userId        String
+  planId        String
+  amount        Int
+  status        OrderStatus @default(PENDING)
+  paymentMethod String?
+  note          String?
+  paidAt        DateTime?
+
+  paymentProvider String?
+  paymentCode     Int?     @unique
+  checkoutUrl     String?
+  qrCode          String?
+  paymentLinkId   String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan Plan @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Subscription {
+  id      String             @id @default(cuid())
+  userId  String
+  planId  String
+  startAt DateTime
+  endAt   DateTime
+  status  SubscriptionStatus @default(ACTIVE)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan Plan @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Project {
+  id     String @id @default(cuid())
+  userId String
+  name   String
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chatSessions ChatSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ChatSession {
+  id        String  @id @default(cuid())
+  userId    String
+  projectId String?
+  title     String  @default("Cuộc trò chuyện mới")
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project  Project?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  messages ChatMessage[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ChatMessage {
+  id        String      @id @default(cuid())
+  sessionId String
+  role      MessageRole
+  content   String
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+}
+
+model UsageLog {
+  id               String @id @default(cuid())
+  userId           String
+  provider         String
+  model            String
+  inputTextLength  Int
+  outputTextLength Int
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+}
