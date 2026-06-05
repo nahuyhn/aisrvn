@@ -1,12 +1,22 @@
 import { prisma } from "@/lib/prisma";
 import { createOrder } from "@/app/actions/order-actions";
 
+type PricingPlan = {
+  id: string;
+  name: string;
+  description?: string | null;
+  price: number;
+  durationDays: number;
+  messageLimitPerDay: number;
+  features?: string[] | string | null;
+};
+
 function formatPrice(price: number) {
   return new Intl.NumberFormat("vi-VN").format(price) + "đ";
 }
 
 export default async function PricingPage() {
-  const plans = await prisma.plan.findMany({
+  const plans: PricingPlan[] = await prisma.plan.findMany({
     where: {
       isActive: true,
     },
@@ -27,7 +37,7 @@ export default async function PricingPage() {
         </div>
 
         <div className="mt-12 grid gap-6 md:grid-cols-4">
-          {plans.map((plan) => (
+          {plans.map((plan: PricingPlan) => (
             <div
               key={plan.id}
               className="rounded-2xl border border-white/10 bg-white/5 p-6"
