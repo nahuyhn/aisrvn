@@ -6,13 +6,13 @@ import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
-type AiMessage = {
-  role: "user" | "assistant" | "system";
+type DbChatMessage = {
+  role: "USER" | "ASSISTANT" | "SYSTEM";
   content: string;
 };
 
-type DbChatMessage = {
-  role: "USER" | "ASSISTANT" | "SYSTEM";
+type AiMessage = {
+  role: "user" | "assistant" | "system";
   content: string;
 };
 
@@ -113,39 +113,29 @@ export async function POST(req: Request) {
       },
     });
 
-    type DbChatMessage = {
-  role: "USER" | "ASSISTANT" | "SYSTEM";
-  content: string;
-};
+    const history: DbChatMessage[] = await prisma.chatMessage.findMany({
+      where: {
+        sessionId: chatSession.id,
+      },
+      select: {
+        role: true,
+        content: true,
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+      take: 20,
+    });
 
-type AiChatMessage = {
-  role: "user" | "assistant" | "system";
-  content: string;
-};
-
-const history: DbChatMessage[] = await prisma.chatMessage.findMany({
-  where: {
-    sessionId: chatSession.id,
-  },
-  select: {
-    role: true,
-    content: true,
-  },
-  orderBy: {
-    createdAt: "asc",
-  },
-  take: 20,
-});
-
-const aiMessages: AiChatMessage[] = history.map((item: DbChatMessage) => ({
-  role:
-    item.role === "USER"
-      ? "user"
-      : item.role === "ASSISTANT"
-        ? "assistant"
-        : "system",
-  content: item.content,
-}));
+    const aiMessages: AiMessage[] = history.map((item: DbChatMessage) => ({
+      role:
+        item.role === "USER"
+          ? "user"
+          : item.role === "ASSISTANT"
+            ? "assistant"
+            : "system",
+      content: item.content,
+    }));
 
     const result = await generateText({
       model: google("gemini-2.5-flash"),
