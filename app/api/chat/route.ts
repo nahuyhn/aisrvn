@@ -6,6 +6,16 @@ import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
+type AiMessage = {
+  role: "user" | "assistant" | "system";
+  content: string;
+};
+
+type DbChatMessage = {
+  role: "USER" | "ASSISTANT" | "SYSTEM";
+  content: string;
+};
+
 async function getCurrentUser() {
   const session = await getServerSession(authOptions);
 
@@ -56,9 +66,9 @@ export async function POST(req: Request) {
     }
 
     let chatSession:
-  | Awaited<ReturnType<typeof prisma.chatSession.findFirst>>
-  | Awaited<ReturnType<typeof prisma.chatSession.create>>
-  | null = null;
+      | Awaited<ReturnType<typeof prisma.chatSession.findFirst>>
+      | Awaited<ReturnType<typeof prisma.chatSession.create>>
+      | null = null;
 
     if (sessionId) {
       chatSession = await prisma.chatSession.findFirst({
@@ -103,39 +113,36 @@ export async function POST(req: Request) {
       },
     });
 
-    type AiMessage = {
-  role: "user" | "assistant" | "system";
-  content: string;
-};
+    const history: DbChatMessage[] = await prisma.chatMessage.findMany({
+      where: {
+        sessionId: chatSession.id,
+      },
+      select: {
+        role: true,
+        content: true,
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+      take: 20,
+    });
 
-type DbChatMessage = {
-  role: "USER" | "ASSISTANT" | "SYSTEM";
-  content: string;
-};
+    const aiMessages: AiMessage[] = history.map((item: DbChatMessage) => {
+      let role: AiMessage["role"] = "system";
 
-const history: DbChatMessage[] = await prisma.chatMessage.findMany({
-  where: {
-    sessionId: chatSession.id,
-  },
-  select: {
-    role: true,
-    content: true,
-  },
-  orderBy: {
-    createdAt: "asc",
-  },
-  take: 20,
-});
+      if (item.role === "USER") {
+        role = "user";
+      }
 
-const aiMessages: AiMessage[] = history.map((item: DbChatMessage) => ({
-  role:
-    item.role === "USER"
-      ? "user"
-      : item.role === "ASSISTANT"
-        ? "assistant"
-        : "system",
-  content: item.content,
-}));
+      if (item.role === "ASSISTANT") {
+        role = "assistant";
+      }
+
+      return {
+        role,
+        content: item.content,
+      };
+    });
 
     const result = await generateText({
       model: google("gemini-2.5-flash"),
