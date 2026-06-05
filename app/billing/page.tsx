@@ -3,15 +3,22 @@ import { redirect } from "next/navigation";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
+type BillingOrder = {
+  id: string;
+  amount: number;
+  status: string;
+  createdAt: Date | string;
+  plan: {
+    name: string;
+  };
+};
+
 function formatPrice(price: number) {
   return new Intl.NumberFormat("vi-VN").format(price) + "đ";
 }
 
-function formatDate(date: Date) {
-  return new Intl.DateTimeFormat("vi-VN", {
-    dateStyle: "short",
-    timeStyle: "short",
-  }).format(date);
+function formatDate(date: Date | string) {
+  return new Intl.DateTimeFormat("vi-VN").format(new Date(date));
 }
 
 export default async function BillingPage() {
@@ -31,17 +38,18 @@ export default async function BillingPage() {
     redirect("/login");
   }
 
-  const orders = await prisma.order.findMany({
-    where: {
-      userId: user.id,
+  const orders: BillingOrder[] = await prisma.order.findMany({
+  include: {
+    plan: {
+      select: {
+        name: true,
+      },
     },
-    include: {
-      plan: true,
-    },
-    orderBy: {
-      createdAt: "desc",
-    },
-  });
+  },
+  orderBy: {
+    createdAt: "desc",
+  },
+});
 
   return (
     <main className="min-h-screen bg-black px-6 py-10 text-white">
@@ -81,7 +89,7 @@ export default async function BillingPage() {
                 </thead>
 
                 <tbody>
-                  {orders.map((order) => (
+                  {orders.map((order: BillingOrder) => (
                     <tr key={order.id} className="border-t border-white/10">
                       <td className="p-4">{order.plan.name}</td>
                       <td className="p-4">{formatPrice(order.amount)}</td>
