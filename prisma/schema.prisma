@@ -8,7 +8,7 @@ datasource db {
 
 enum UserRole {
   USER
-  ADMIN
+  SUPER_ADMIN
 }
 
 enum UserStatus {
@@ -50,6 +50,9 @@ model User {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  customerType String  @default("NORMAL")
+  vipDiscount  Int?
+  vipNote      String?
 }
 
 model Plan {

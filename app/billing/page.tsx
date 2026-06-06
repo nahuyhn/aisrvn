@@ -18,7 +18,10 @@ function formatPrice(price: number) {
 }
 
 function formatDate(date: Date | string) {
-  return new Intl.DateTimeFormat("vi-VN").format(new Date(date));
+  return new Intl.DateTimeFormat("vi-VN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(date));
 }
 
 export default async function BillingPage() {

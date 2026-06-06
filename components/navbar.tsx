@@ -27,9 +27,6 @@ export default async function Navbar() {
           <a href="/billing" className="transition hover:text-white">
             Thanh toán
           </a>
-          <a href="/admin" className="transition hover:text-white">
-            Admin
-          </a>
         </nav>
 
         {session?.user ? (

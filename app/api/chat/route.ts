@@ -42,12 +42,6 @@ function createTitle(message: string) {
 
 export async function POST(req: Request) {
   try {
-    const user = await getCurrentUser();
-
-    if (!user) {
-      return Response.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
     const body = await req.json();
 
     const sessionId =
@@ -63,6 +57,35 @@ export async function POST(req: Request) {
         { error: "Tin nhắn không hợp lệ." },
         { status: 400 }
       );
+    }
+
+    const user = await getCurrentUser();
+
+    /**
+     * Guest mode:
+     * Người chưa đăng nhập vẫn được chat thử.
+     * Không tạo ChatSession.
+     * Không lưu ChatMessage.
+     * Không lưu UsageLog.
+     * Refresh trang là mất đoạn chat.
+     */
+    if (!user) {
+      const result = await generateText({
+        model: google("gemini-2.5-flash"),
+        messages: [
+          {
+            role: "user",
+            content: message,
+          },
+        ],
+      });
+
+      return Response.json({
+        sessionId: null,
+        chatSession: null,
+        answer: result.text,
+        isGuest: true,
+      });
     }
 
     let chatSession:
@@ -183,6 +206,7 @@ export async function POST(req: Request) {
       sessionId: updatedChatSession.id,
       chatSession: updatedChatSession,
       answer: assistantMessage.content,
+      isGuest: false,
     });
   } catch (error) {
     console.error("CHAT_API_ERROR:", error);

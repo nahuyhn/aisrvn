@@ -81,20 +81,50 @@ export default function ChatPage() {
   }, [messages, isLoading]);
 
   async function loadProjects() {
+  try {
+    const res = await fetch("/api/projects", {
+      cache: "no-store",
+    });
+
+    const rawText = await res.text();
+
+    let data: any = {};
+
     try {
-      const res = await fetch("/api/projects", {
-        cache: "no-store",
-      });
-
-      const data = await res.json();
-
-      if (res.ok) {
-        setProjects(data.projects || []);
-      }
+      data = rawText ? JSON.parse(rawText) : {};
     } catch {
-      setErrorText("Không tải được danh sách project.");
+      throw new Error(
+        `API /api/projects không trả JSON. Status: ${
+          res.status
+        }. Response: ${rawText.slice(0, 200)}`
+      );
     }
+
+    if (!res.ok) {
+      if (res.status === 401) {
+        setProjects([]);
+        setActiveProjectId(null);
+        setErrorText("");
+        return;
+      }
+
+      throw new Error(
+        data.error || `Không tải được project. Status: ${res.status}`
+      );
+    }
+
+    setProjects(data.projects || []);
+    setErrorText("");
+  } catch (error) {
+    console.error("LOAD_PROJECTS_ERROR:", error);
+
+    setErrorText(
+      error instanceof Error
+        ? error.message
+        : "Không tải được danh sách project."
+    );
   }
+}
 
   async function loadSessions() {
     try {
@@ -117,10 +147,16 @@ export default function ChatPage() {
       }
 
       if (!res.ok) {
-        throw new Error(
-          data.error || `Không tải được lịch sử chat. Status: ${res.status}`
-        );
-      }
+  if (res.status === 401) {
+    setSessions([]);
+    setErrorText("");
+    return;
+  }
+
+  throw new Error(
+    data.error || `Không tải được lịch sử chat. Status: ${res.status}`
+  );
+}
 
       setSessions(data.sessions || []);
       setErrorText("");
@@ -150,8 +186,13 @@ export default function ChatPage() {
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || "Không tạo được project.");
-      }
+  if (res.status === 401) {
+    setErrorText("Bạn cần đăng nhập để tạo project.");
+    return;
+  }
+
+  throw new Error(data.error || "Không tạo được project.");
+}
 
       setProjects((prev) => [data.project, ...prev]);
       setActiveProjectId(data.project.id);
@@ -338,27 +379,33 @@ export default function ChatPage() {
         throw new Error(data.error || "Chat failed");
       }
 
-      setActiveSessionId(data.sessionId);
+      if (data.isGuest) {
+  setActiveSessionId(null);
+} else {
+  setActiveSessionId(data.sessionId);
 
-      if (data.chatSession) {
-        setSessions((prev) => {
-          const rest = prev.filter(
-            (session) => session.id !== data.chatSession.id
-          );
+  if (data.chatSession) {
+    setSessions((prev) => {
+      const rest = prev.filter(
+        (session) => session.id !== data.chatSession.id
+      );
 
-          return [data.chatSession, ...rest];
-        });
-      }
+      return [data.chatSession, ...rest];
+    });
+  }
+}
 
-      const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "ASSISTANT",
-        content: data.answer,
-      };
+const assistantMessage: ChatMessage = {
+  id: crypto.randomUUID(),
+  role: "ASSISTANT",
+  content: data.answer,
+};
 
-      setMessages((prev) => [...prev, assistantMessage]);
+setMessages((prev) => [...prev, assistantMessage]);
 
-      await loadSessions();
+if (!data.isGuest) {
+  await loadSessions();
+}
     } catch (error) {
       const message =
         error instanceof Error
@@ -656,8 +703,8 @@ export default function ChatPage() {
 
             <p className="mt-3 text-center text-sm text-white/45">
               {activeProject
-                ? `Cuộc trò chuyện mới sẽ được lưu trong project "${activeProject.name}".`
-                : "Cuộc trò chuyện mới sẽ được lưu vào lịch sử chung."}
+  ? `Cuộc trò chuyện mới sẽ được lưu trong project "${activeProject.name}".`
+  : "Bạn có thể chat thử ngay. Đăng nhập để lưu lịch sử và quản lý project."}
             </p>
 
             <form
