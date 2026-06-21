@@ -83,51 +83,56 @@ export async function createOrder(planId: string) {
     },
   });
 
-  try {
-    const paymentLink = await getPayOS().paymentRequests.create({
-      orderCode: paymentCode,
-      amount: plan.price,
-      description: getPayOSDescription(paymentCode),
-      items: [
-        {
-          name: plan.name.slice(0, 100),
-          quantity: 1,
-          price: plan.price,
-        },
-      ],
-      returnUrl: `${appUrl}/billing?payment=success&orderCode=${paymentCode}`,
-      cancelUrl: `${appUrl}/billing?payment=cancel&orderCode=${paymentCode}`,
-    });
+  let checkoutUrl: string;
 
-    if (!paymentLink.checkoutUrl) {
-      throw new Error("PayOS không trả về checkoutUrl.");
-    }
+try {
+  const paymentLink = await getPayOS().paymentRequests.create({
+    orderCode: paymentCode,
+    amount: plan.price,
+    description: getPayOSDescription(paymentCode),
+    items: [
+      {
+        name: plan.name.slice(0, 100),
+        quantity: 1,
+        price: plan.price,
+      },
+    ],
+    returnUrl: `${appUrl}/billing?payment=success&orderCode=${paymentCode}`,
+    cancelUrl: `${appUrl}/billing?payment=cancel&orderCode=${paymentCode}`,
+  });
 
-    await prisma.order.update({
-      where: {
-        id: order.id,
-      },
-      data: {
-        checkoutUrl: paymentLink.checkoutUrl,
-        qrCode: paymentLink.qrCode,
-        paymentLinkId: paymentLink.paymentLinkId,
-      },
-    });
-
-    redirect(paymentLink.checkoutUrl);
-  } catch (error) {
-    await prisma.order.update({
-      where: {
-        id: order.id,
-      },
-      data: {
-        status: "CANCELLED",
-        note: `Tạo link PayOS thất bại: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`,
-      },
-    });
-
-    throw error;
+  if (!paymentLink.checkoutUrl) {
+    throw new Error("PayOS không trả về checkoutUrl.");
   }
+
+  checkoutUrl = paymentLink.checkoutUrl;
+
+  await prisma.order.update({
+    where: {
+      id: order.id,
+    },
+    data: {
+      checkoutUrl: paymentLink.checkoutUrl,
+      qrCode: paymentLink.qrCode,
+      paymentLinkId: paymentLink.paymentLinkId,
+    },
+  });
+} catch (error) {
+  await prisma.order.update({
+    where: {
+      id: order.id,
+    },
+    data: {
+      status: "CANCELLED",
+      note: `Tạo link PayOS thất bại: ${
+        error instanceof Error ? error.message : "Unknown error"
+      }`,
+    },
+  });
+
+  throw error;
+}
+
+// Quan trọng: redirect phải nằm ngoài try/catch
+redirect(checkoutUrl);
 }

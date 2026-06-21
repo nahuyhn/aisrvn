@@ -78,10 +78,12 @@ export async function POST(request: Request) {
     await prisma.$transaction(async (tx) => {
       // updateMany giúp webhook gửi lại cũng không tạo gói lần hai
       const updatedOrder = await tx.order.updateMany({
-        where: {
-          id: order.id,
-          status: "PENDING",
-        },
+  where: {
+    id: order.id,
+    status: {
+      in: ["PENDING", "CANCELLED"],
+    },
+  },
         data: {
           status: "PAID",
           paidAt: new Date(),
