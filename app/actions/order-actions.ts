@@ -1,9 +1,36 @@
 "use server";
 
+import { randomInt } from "crypto";
 import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import { authOptions } from "@/lib/auth";
+import { getAppUrl, getPayOS } from "@/lib/payos";
 import { prisma } from "@/lib/prisma";
+
+async function generateUniquePaymentCode() {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const paymentCode = randomInt(100_000_000, 2_147_000_000);
+
+    const existingOrder = await prisma.order.findUnique({
+      where: {
+        paymentCode,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!existingOrder) {
+      return paymentCode;
+    }
+  }
+
+  throw new Error("Không tạo được mã thanh toán duy nhất. Hãy thử lại.");
+}
+
+function getPayOSDescription(paymentCode: number) {
+  return `AIWRAP ${paymentCode}`.slice(0, 25);
+}
 
 export async function createOrder(planId: string) {
   const session = await getServerSession(authOptions);
@@ -22,6 +49,10 @@ export async function createOrder(planId: string) {
     redirect("/login");
   }
 
+  if (user.status === "BANNED") {
+    throw new Error("Tài khoản của bạn đã bị khóa.");
+  }
+
   const plan = await prisma.plan.findUnique({
     where: {
       id: planId,
@@ -32,16 +63,71 @@ export async function createOrder(planId: string) {
     throw new Error("Gói không tồn tại hoặc đã bị tắt.");
   }
 
-  await prisma.order.create({
+  if (!Number.isInteger(plan.price) || plan.price <= 0) {
+    throw new Error("Giá gói không hợp lệ.");
+  }
+
+  const appUrl = getAppUrl();
+  const paymentCode = await generateUniquePaymentCode();
+
+  const order = await prisma.order.create({
     data: {
       userId: user.id,
       planId: plan.id,
       amount: plan.price,
       status: "PENDING",
-      paymentMethod: "BANK_TRANSFER",
-      note: "Đơn hàng tạo từ trang pricing",
+      paymentMethod: "PAYOS",
+      paymentProvider: "PAYOS",
+      paymentCode,
+      note: `Đơn PayOS cho ${plan.name}`,
     },
   });
 
-  redirect("/billing");
+  try {
+    const paymentLink = await getPayOS().paymentRequests.create({
+      orderCode: paymentCode,
+      amount: plan.price,
+      description: getPayOSDescription(paymentCode),
+      items: [
+        {
+          name: plan.name.slice(0, 100),
+          quantity: 1,
+          price: plan.price,
+        },
+      ],
+      returnUrl: `${appUrl}/billing?payment=success&orderCode=${paymentCode}`,
+      cancelUrl: `${appUrl}/billing?payment=cancel&orderCode=${paymentCode}`,
+    });
+
+    if (!paymentLink.checkoutUrl) {
+      throw new Error("PayOS không trả về checkoutUrl.");
+    }
+
+    await prisma.order.update({
+      where: {
+        id: order.id,
+      },
+      data: {
+        checkoutUrl: paymentLink.checkoutUrl,
+        qrCode: paymentLink.qrCode,
+        paymentLinkId: paymentLink.paymentLinkId,
+      },
+    });
+
+    redirect(paymentLink.checkoutUrl);
+  } catch (error) {
+    await prisma.order.update({
+      where: {
+        id: order.id,
+      },
+      data: {
+        status: "CANCELLED",
+        note: `Tạo link PayOS thất bại: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      },
+    });
+
+    throw error;
+  }
 }

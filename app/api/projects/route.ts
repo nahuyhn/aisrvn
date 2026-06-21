@@ -18,43 +18,71 @@ async function getCurrentUser() {
 }
 
 export async function GET() {
-  const user = await getCurrentUser();
+  try {
+    const user = await getCurrentUser();
 
-  if (!user) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
+    if (!user) {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    if (user.status === "BANNED") {
+      return Response.json(
+        { error: "Tài khoản của bạn đã bị khóa." },
+        { status: 403 }
+      );
+    }
+
+    const projects = await prisma.project.findMany({
+      where: {
+        userId: user.id,
+      },
+      orderBy: {
+        updatedAt: "desc",
+      },
+    });
+
+    return Response.json(projects);
+  } catch (error) {
+    console.error("GET_PROJECTS_ERROR", error);
+
+    return Response.json(
+      { error: "Có lỗi xảy ra khi lấy danh sách project." },
+      { status: 500 }
+    );
   }
-
-  const projects = await prisma.project.findMany({
-    where: {
-      userId: user.id,
-    },
-    orderBy: {
-      updatedAt: "desc",
-    },
-  });
-
-  return Response.json({ projects });
 }
 
 export async function POST(req: Request) {
-  const user = await getCurrentUser();
+  try {
+    const user = await getCurrentUser();
 
-  if (!user) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
+    if (!user) {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    if (user.status === "BANNED") {
+      return Response.json(
+        { error: "Tài khoản của bạn đã bị khóa." },
+        { status: 403 }
+      );
+    }
+
+    const body = await req.json();
+
+    const project = await prisma.project.create({
+      data: {
+        name: body.name || "Project mới",
+        userId: user.id,
+      },
+    });
+
+    return Response.json(project);
+  } catch (error) {
+    console.error("CREATE_PROJECT_ERROR", error);
+
+    return Response.json(
+      { error: "Có lỗi xảy ra khi tạo project." },
+      { status: 500 }
+    );
   }
-
-  const { name } = await req.json();
-
-  if (!name || typeof name !== "string") {
-    return Response.json({ error: "Tên project không hợp lệ" }, { status: 400 });
-  }
-
-  const project = await prisma.project.create({
-    data: {
-      userId: user.id,
-      name: name.trim(),
-    },
-  });
-
-  return Response.json({ project });
 }

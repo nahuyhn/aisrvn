@@ -28,6 +28,13 @@ export async function DELETE(
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  if (user.status === "BANNED") {
+  return Response.json(
+    { error: "Tài khoản của bạn đã bị khóa." },
+    { status: 403 }
+  );
+}
+
   const { id } = await context.params;
 
   const project = await prisma.project.findFirst({

@@ -27,24 +27,28 @@ export const authOptions: NextAuthOptions = {
       });
 
       if (!existingUser) {
-        await prisma.user.create({
-          data: {
-            email: user.email,
-            name: user.name,
-            image: user.image,
-          },
-        });
-      } else {
-        await prisma.user.update({
-          where: {
-            email: user.email,
-          },
-          data: {
-            name: user.name,
-            image: user.image,
-          },
-        });
-      }
+  await prisma.user.create({
+    data: {
+      email: user.email,
+      name: user.name,
+      image: user.image,
+    },
+  });
+} else {
+  if (existingUser.status === "BANNED") {
+    return false;
+  }
+
+  await prisma.user.update({
+    where: {
+      email: user.email,
+    },
+    data: {
+      name: user.name,
+      image: user.image,
+    },
+  });
+}
 
       return true;
     },

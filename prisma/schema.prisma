@@ -53,6 +53,7 @@ model User {
   customerType String  @default("NORMAL")
   vipDiscount  Int?
   vipNote      String?
+  modelAccesses UserModelAccess[]
 }
 
 model Plan {
@@ -68,6 +69,7 @@ model Plan {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  planModels PlanModel[]
 }
 
 model Order {
@@ -156,4 +158,48 @@ model UsageLog {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   createdAt DateTime @default(now())
+}
+
+model ModelConfig {
+  id            String   @id @default(cuid())
+  provider      String
+  model         String
+  displayName   String
+  description   String?
+  category      String   @default("FREE")
+  supportsImage Boolean  @default(false)
+  supportsFile  Boolean  @default(false)
+  isFree        Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  planModels    PlanModel[]
+  accesses      UserModelAccess[]
+}
+
+model PlanModel {
+  id       String @id @default(cuid())
+  planId   String
+  modelId  String
+
+  plan     Plan        @relation(fields: [planId], references: [id], onDelete: Cascade)
+  model    ModelConfig @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@unique([planId, modelId])
+}
+
+model UserModelAccess {
+  id        String   @id @default(cuid())
+  userId    String
+  modelId   String
+  expiresAt DateTime
+  source    String   @default("ORDER")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  model     ModelConfig @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, modelId])
 }

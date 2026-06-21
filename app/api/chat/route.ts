@@ -16,6 +16,23 @@ type AiMessage = {
   content: string;
 };
 
+type ChatAttachment = {
+  name: string;
+  type: string;
+  dataUrl: string;
+};
+
+type SelectedModel = {
+  id: string;
+  provider: string;
+  model: string;
+  displayName: string;
+  category: string;
+  isFree: boolean;
+  supportsImage: boolean;
+  supportsFile: boolean;
+};
+
 async function getCurrentUser() {
   const session = await getServerSession(authOptions);
 
@@ -40,6 +57,63 @@ function createTitle(message: string) {
   return clean.slice(0, 50) + "...";
 }
 
+async function getSelectedModel(modelId: string | null) {
+  let selectedModel: SelectedModel | null = null;
+
+  if (modelId) {
+    selectedModel = await prisma.modelConfig.findFirst({
+      where: {
+        id: modelId,
+        isActive: true,
+        isFree: true,
+      },
+      select: {
+        id: true,
+        provider: true,
+        model: true,
+        displayName: true,
+        category: true,
+        isFree: true,
+        supportsImage: true,
+        supportsFile: true,
+      },
+    });
+  }
+
+  if (!selectedModel) {
+    selectedModel = await prisma.modelConfig.findFirst({
+      where: {
+        isActive: true,
+        isFree: true,
+      },
+      orderBy: [
+        {
+          sortOrder: "asc",
+        },
+        {
+          displayName: "asc",
+        },
+      ],
+      select: {
+        id: true,
+        provider: true,
+        model: true,
+        displayName: true,
+        category: true,
+        isFree: true,
+        supportsImage: true,
+        supportsFile: true,
+      },
+    });
+  }
+
+  if (!selectedModel) {
+    throw new Error("Chưa có model miễn phí nào đang hoạt động.");
+  }
+
+  return selectedModel;
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -49,8 +123,19 @@ export async function POST(req: Request) {
 
     const projectId =
       typeof body.projectId === "string" ? body.projectId : null;
+    const modelId =
+      typeof body.modelId === "string" ? body.modelId : null;
 
     const message = body.message;
+    const attachments: ChatAttachment[] = Array.isArray(body.attachments)
+  ? body.attachments.filter(
+      (file: ChatAttachment) =>
+        typeof file.name === "string" &&
+        typeof file.type === "string" &&
+        typeof file.dataUrl === "string" &&
+        file.type.startsWith("image/")
+    )
+  : [];
 
     if (!message || typeof message !== "string") {
       return Response.json(
@@ -58,8 +143,36 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
+    const selectedModel = await getSelectedModel(modelId);
+    if (attachments.length > 0 && !selectedModel.supportsImage) {
+  return Response.json(
+    {
+      error: `Model ${selectedModel.displayName} chưa hỗ trợ hình ảnh.`,
+    },
+    { status: 400 }
+  );
+}
+    const userContent =
+  attachments.length > 0
+    ? [
+        {
+          type: "text" as const,
+          text: message,
+        },
+        ...attachments.map((file) => ({
+          type: "image" as const,
+          image: file.dataUrl,
+        })),
+      ]
+    : message;
 
     const user = await getCurrentUser();
+    if (user?.status === "BANNED") {
+  return Response.json(
+    { error: "Tài khoản của bạn đã bị khóa." },
+    { status: 403 }
+  );
+}
 
     /**
      * Guest mode:
@@ -71,21 +184,27 @@ export async function POST(req: Request) {
      */
     if (!user) {
       const result = await generateText({
-        model: google("gemini-2.5-flash"),
-        messages: [
-          {
-            role: "user",
-            content: message,
-          },
-        ],
-      });
+  model: google(selectedModel.model),
+  messages: [
+    {
+      role: "user",
+      content: userContent,
+    },
+  ],
+});
 
       return Response.json({
-        sessionId: null,
-        chatSession: null,
-        answer: result.text,
-        isGuest: true,
-      });
+  sessionId: null,
+  chatSession: null,
+  answer: result.text,
+  isGuest: true,
+  model: {
+    id: selectedModel.id,
+    provider: selectedModel.provider,
+    model: selectedModel.model,
+    displayName: selectedModel.displayName,
+  },
+});
     }
 
     let chatSession:
@@ -161,9 +280,17 @@ export async function POST(req: Request) {
     }));
 
     const result = await generateText({
-      model: google("gemini-2.5-flash"),
-      messages: aiMessages,
-    });
+  model: google(selectedModel.model),
+  messages:
+    attachments.length > 0
+      ? [
+          {
+            role: "user",
+            content: userContent,
+          },
+        ]
+      : aiMessages,
+});
 
     const assistantMessage = await prisma.chatMessage.create({
       data: {
@@ -193,21 +320,27 @@ export async function POST(req: Request) {
     });
 
     await prisma.usageLog.create({
-      data: {
-        userId: user.id,
-        provider: "Google",
-        model: "gemini-2.5-flash",
-        inputTextLength: result.usage?.inputTokens ?? 0,
-        outputTextLength: result.usage?.outputTokens ?? 0,
-      },
-    });
+  data: {
+    userId: user.id,
+    provider: selectedModel.provider,
+    model: selectedModel.model,
+    inputTextLength: result.usage?.inputTokens ?? 0,
+    outputTextLength: result.usage?.outputTokens ?? 0,
+  },
+});
 
     return Response.json({
-      sessionId: updatedChatSession.id,
-      chatSession: updatedChatSession,
-      answer: assistantMessage.content,
-      isGuest: false,
-    });
+  sessionId: updatedChatSession.id,
+  chatSession: updatedChatSession,
+  answer: assistantMessage.content,
+  isGuest: false,
+  model: {
+    id: selectedModel.id,
+    provider: selectedModel.provider,
+    model: selectedModel.model,
+    displayName: selectedModel.displayName,
+  },
+});
   } catch (error) {
     console.error("CHAT_API_ERROR:", error);
 

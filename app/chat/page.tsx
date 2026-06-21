@@ -1,5 +1,6 @@
 "use client";
 
+import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type Project = {
@@ -14,27 +15,53 @@ type ChatSession = {
   updatedAt: string;
 };
 
+type ChatAttachment = {
+  id: string;
+  name: string;
+  type: string;
+  dataUrl: string;
+};
+
 type ChatMessage = {
   id: string;
   role: "USER" | "ASSISTANT" | "SYSTEM";
   content: string;
+  attachments?: ChatAttachment[];
 };
 
-const SUGGESTIONS = [
-  "Lên ý tưởng AI wrapper SaaS",
-  "Giải thích Next.js App Router",
-  "Viết landing page cho app AI",
-  "So sánh Gemini, GPT, Claude và DeepSeek",
-];
+type AttachedFile = {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  dataUrl: string;
+};
+
+type AiModel = {
+  id: string;
+  provider: string;
+  model: string;
+  displayName: string;
+  description: string | null;
+  category: string;
+  supportsImage: boolean;
+  supportsFile: boolean;
+  isFree: boolean;
+  sortOrder: number;
+};
 
 export default function ChatPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  const [models, setModels] = useState<AiModel[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
 
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -51,6 +78,10 @@ export default function ChatPage() {
   const activeProject = useMemo(() => {
     return projects.find((project) => project.id === activeProjectId) || null;
   }, [projects, activeProjectId]);
+
+  const selectedModel = useMemo(() => {
+  return models.find((model) => model.id === selectedModelId) || models[0] || null;
+}, [models, selectedModelId]);
 
   const filteredSessions = useMemo(() => {
     return sessions.filter((session) => {
@@ -69,7 +100,7 @@ export default function ChatPage() {
   useEffect(() => {
     async function init() {
       setIsLoadingData(true);
-      await Promise.all([loadProjects(), loadSessions()]);
+      await Promise.all([loadProjects(), loadSessions(), loadModels()]);
       setIsLoadingData(false);
     }
 
@@ -81,8 +112,54 @@ export default function ChatPage() {
   }, [messages, isLoading]);
 
   async function loadProjects() {
+    try {
+      const res = await fetch("/api/projects", {
+        cache: "no-store",
+      });
+
+      const rawText = await res.text();
+
+      let data: any = {};
+
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        throw new Error(
+          `API /api/projects không trả JSON. Status: ${
+            res.status
+          }. Response: ${rawText.slice(0, 200)}`
+        );
+      }
+
+      if (!res.ok) {
+        if (res.status === 401) {
+          setProjects([]);
+          setActiveProjectId(null);
+          setErrorText("");
+          return;
+        }
+
+        throw new Error(
+          data.error || `Không tải được project. Status: ${res.status}`
+        );
+      }
+
+      setProjects(data.projects || []);
+      setErrorText("");
+    } catch (error) {
+      console.error("LOAD_PROJECTS_ERROR:", error);
+
+      setErrorText(
+        error instanceof Error
+          ? error.message
+          : "Không tải được danh sách project."
+      );
+    }
+  }
+
+  async function loadModels() {
   try {
-    const res = await fetch("/api/projects", {
+    const res = await fetch("/api/models", {
       cache: "no-store",
     });
 
@@ -94,34 +171,30 @@ export default function ChatPage() {
       data = rawText ? JSON.parse(rawText) : {};
     } catch {
       throw new Error(
-        `API /api/projects không trả JSON. Status: ${
+        `API /api/models không trả JSON. Status: ${
           res.status
         }. Response: ${rawText.slice(0, 200)}`
       );
     }
 
     if (!res.ok) {
-      if (res.status === 401) {
-        setProjects([]);
-        setActiveProjectId(null);
-        setErrorText("");
-        return;
-      }
-
-      throw new Error(
-        data.error || `Không tải được project. Status: ${res.status}`
-      );
+      throw new Error(data.error || "Không tải được danh sách model.");
     }
 
-    setProjects(data.projects || []);
-    setErrorText("");
+    const nextModels: AiModel[] = data.models || [];
+
+    setModels(nextModels);
+
+    if (!selectedModelId && nextModels.length > 0) {
+      setSelectedModelId(nextModels[0].id);
+    }
   } catch (error) {
-    console.error("LOAD_PROJECTS_ERROR:", error);
+    console.error("LOAD_MODELS_ERROR:", error);
 
     setErrorText(
       error instanceof Error
         ? error.message
-        : "Không tải được danh sách project."
+        : "Không tải được danh sách model."
     );
   }
 }
@@ -147,16 +220,16 @@ export default function ChatPage() {
       }
 
       if (!res.ok) {
-  if (res.status === 401) {
-    setSessions([]);
-    setErrorText("");
-    return;
-  }
+        if (res.status === 401) {
+          setSessions([]);
+          setErrorText("");
+          return;
+        }
 
-  throw new Error(
-    data.error || `Không tải được lịch sử chat. Status: ${res.status}`
-  );
-}
+        throw new Error(
+          data.error || `Không tải được lịch sử chat. Status: ${res.status}`
+        );
+      }
 
       setSessions(data.sessions || []);
       setErrorText("");
@@ -183,21 +256,23 @@ export default function ChatPage() {
         body: JSON.stringify({ name }),
       });
 
-      const data = await res.json();
+      const rawText = await res.text();
+      const data = rawText ? JSON.parse(rawText) : {};
 
       if (!res.ok) {
-  if (res.status === 401) {
-    setErrorText("Bạn cần đăng nhập để tạo project.");
-    return;
-  }
+        if (res.status === 401) {
+          setErrorText("Bạn cần đăng nhập để tạo project.");
+          return;
+        }
 
-  throw new Error(data.error || "Không tạo được project.");
-}
+        throw new Error(data.error || "Không tạo được project.");
+      }
 
       setProjects((prev) => [data.project, ...prev]);
       setActiveProjectId(data.project.id);
       setActiveSessionId(null);
       setMessages([]);
+      setAttachedFiles([]);
       setNewProjectName("");
       setShowProjectInput(false);
       setErrorText("");
@@ -232,6 +307,7 @@ export default function ChatPage() {
         setActiveProjectId(null);
         setActiveSessionId(null);
         setMessages([]);
+        setAttachedFiles([]);
       }
 
       await loadSessions();
@@ -248,6 +324,7 @@ export default function ChatPage() {
     setActiveProjectId(projectId ?? activeProjectId);
     setMessages([]);
     setInput("");
+    setAttachedFiles([]);
     setErrorText("");
   }
 
@@ -278,6 +355,7 @@ export default function ChatPage() {
       setActiveSessionId(data.chatSession.id);
       setActiveProjectId(data.chatSession.projectId || null);
       setMessages(data.chatSession.messages || []);
+      setAttachedFiles([]);
     } catch (error) {
       setErrorText(
         error instanceof Error
@@ -322,6 +400,7 @@ export default function ChatPage() {
       if (activeSessionId === sessionId) {
         setActiveSessionId(null);
         setMessages([]);
+        setAttachedFiles([]);
       }
 
       setErrorText("");
@@ -336,19 +415,98 @@ export default function ChatPage() {
     }
   }
 
+  function addImageFile(file: File) {
+    const maxSize = 10 * 1024 * 1024;
+
+    if (file.size > maxSize) {
+      setErrorText(`Ảnh "${file.name || "clipboard-image"}" vượt quá 10MB.`);
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      const result = reader.result;
+
+      if (typeof result !== "string") return;
+
+      setAttachedFiles((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          name: file.name || `pasted-image-${Date.now()}.png`,
+          type: file.type || "image/png",
+          size: file.size,
+          dataUrl: result,
+        },
+      ]);
+    };
+
+    reader.readAsDataURL(file);
+  }
+
+  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []);
+
+    if (files.length === 0) return;
+
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+
+    if (imageFiles.length !== files.length) {
+      setErrorText(
+        "Hiện tại chỉ hỗ trợ gửi ảnh. File PDF/DOC/TXT sẽ làm ở bước sau."
+      );
+    }
+
+    imageFiles.forEach(addImageFile);
+
+    event.target.value = "";
+  }
+
+  function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const items = Array.from(event.clipboardData.items);
+    const imageItems = items.filter((item) => item.type.startsWith("image/"));
+
+    if (imageItems.length === 0) return;
+
+    event.preventDefault();
+
+    imageItems.forEach((item) => {
+      const file = item.getAsFile();
+
+      if (file) {
+        addImageFile(file);
+      }
+    });
+  }
+
+  function removeAttachedFile(fileId: string) {
+    setAttachedFiles((prev) => prev.filter((file) => file.id !== fileId));
+  }
+
   async function sendMessage(text?: string) {
     const messageText = (text || input).trim();
 
-    if (!messageText || isLoading) return;
+    if ((!messageText && attachedFiles.length === 0) || isLoading) return;
+
+    const messageAttachments = attachedFiles.map((file) => ({
+      id: file.id,
+      name: file.name,
+      type: file.type,
+      dataUrl: file.dataUrl,
+    }));
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "USER",
-      content: messageText,
+      content:
+        messageText || (messageAttachments.length > 0 ? "Đã gửi ảnh." : ""),
+      attachments: messageAttachments,
     };
 
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
+    setAttachedFiles([]);
     setIsLoading(true);
     setErrorText("");
 
@@ -361,7 +519,17 @@ export default function ChatPage() {
         body: JSON.stringify({
           sessionId: activeSessionId,
           projectId: activeProjectId,
-          message: messageText,
+          modelId: selectedModelId,
+          message:
+            messageText ||
+            (messageAttachments.length > 0
+              ? "Hãy mô tả nội dung trong ảnh này."
+              : ""),
+          attachments: messageAttachments.map((file) => ({
+            name: file.name,
+            type: file.type,
+            dataUrl: file.dataUrl,
+          })),
         }),
       });
 
@@ -380,32 +548,32 @@ export default function ChatPage() {
       }
 
       if (data.isGuest) {
-  setActiveSessionId(null);
-} else {
-  setActiveSessionId(data.sessionId);
+        setActiveSessionId(null);
+      } else {
+        setActiveSessionId(data.sessionId);
 
-  if (data.chatSession) {
-    setSessions((prev) => {
-      const rest = prev.filter(
-        (session) => session.id !== data.chatSession.id
-      );
+        if (data.chatSession) {
+          setSessions((prev) => {
+            const rest = prev.filter(
+              (session) => session.id !== data.chatSession.id
+            );
 
-      return [data.chatSession, ...rest];
-    });
-  }
-}
+            return [data.chatSession, ...rest];
+          });
+        }
+      }
 
-const assistantMessage: ChatMessage = {
-  id: crypto.randomUUID(),
-  role: "ASSISTANT",
-  content: data.answer,
-};
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "ASSISTANT",
+        content: data.answer,
+      };
 
-setMessages((prev) => [...prev, assistantMessage]);
+      setMessages((prev) => [...prev, assistantMessage]);
 
-if (!data.isGuest) {
-  await loadSessions();
-}
+      if (!data.isGuest) {
+        await loadSessions();
+      }
     } catch (error) {
       const message =
         error instanceof Error
@@ -426,6 +594,31 @@ if (!data.isGuest) {
       setIsLoading(false);
     }
   }
+
+  const attachmentPreview = attachedFiles.length > 0 && (
+    <div className="flex flex-wrap gap-2 px-3 pb-3">
+      {attachedFiles.map((file) => (
+        <div
+          key={file.id}
+          className="relative h-20 w-20 overflow-hidden rounded-xl border border-white/10 bg-black/30"
+        >
+          <img
+            src={file.dataUrl}
+            alt={file.name}
+            className="h-full w-full object-cover"
+          />
+
+          <button
+            type="button"
+            onClick={() => removeAttachedFile(file.id)}
+            className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-xs text-white hover:bg-red-500"
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  );
 
   return (
     <main className="flex min-h-screen bg-[#212121] text-white">
@@ -522,6 +715,7 @@ if (!data.isGuest) {
                   setActiveProjectId(null);
                   setActiveSessionId(null);
                   setMessages([]);
+                  setAttachedFiles([]);
                 }}
                 className={`w-full truncate rounded-xl px-3 py-2.5 text-left text-sm ${
                   activeProjectId === null
@@ -551,6 +745,7 @@ if (!data.isGuest) {
                         setActiveProjectId(project.id);
                         setActiveSessionId(null);
                         setMessages([]);
+                        setAttachedFiles([]);
                       }}
                       className="min-w-0 flex-1 truncate px-3 py-2.5 text-left text-sm"
                       title={project.name}
@@ -667,9 +862,23 @@ if (!data.isGuest) {
             )}
 
             <div className="min-w-0">
-              <p className="truncate text-lg font-medium">
-                Gemini Flash · Free
-              </p>
+              <div className="flex items-center gap-2">
+  <select
+    value={selectedModelId || ""}
+    onChange={(e) => setSelectedModelId(e.target.value)}
+    className="rounded-xl border border-white/10 bg-[#303030] px-3 py-2 text-sm text-white outline-none"
+  >
+    {models.map((model) => (
+      <option key={model.id} value={model.id}>
+        {model.displayName}
+      </option>
+    ))}
+  </select>
+
+  <span className="text-xs text-white/40">
+    {selectedModel?.category || "FREE"}
+  </span>
+</div>
 
               <p className="truncate text-xs text-white/40">
                 {activeProject
@@ -703,8 +912,8 @@ if (!data.isGuest) {
 
             <p className="mt-3 text-center text-sm text-white/45">
               {activeProject
-  ? `Cuộc trò chuyện mới sẽ được lưu trong project "${activeProject.name}".`
-  : "Bạn có thể chat thử ngay. Đăng nhập để lưu lịch sử và quản lý project."}
+                ? `Cuộc trò chuyện mới sẽ được lưu trong project "${activeProject.name}".`
+                : "Bạn có thể chat thử ngay. Đăng nhập để lưu lịch sử và quản lý project."}
             </p>
 
             <form
@@ -718,6 +927,7 @@ if (!data.isGuest) {
                 <textarea
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
+                  onPaste={handlePaste}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
@@ -730,14 +940,31 @@ if (!data.isGuest) {
                   className="min-h-24 w-full resize-none bg-transparent px-3 py-3 text-base text-white outline-none placeholder:text-white/45"
                 />
 
+                {attachmentPreview}
+
                 <div className="flex items-center justify-between px-1 pb-1">
-                  <span className="rounded-full bg-[#424242] px-3 py-1.5 text-xs text-white/70">
-                    Gemini Flash
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <label className="cursor-pointer rounded-full bg-[#424242] px-3 py-1.5 text-xs text-white/70 hover:bg-[#4a4a4a]">
+                      + Ảnh
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="hidden"
+                        onChange={handleFileChange}
+                      />
+                    </label>
+
+                    <span className="rounded-full bg-[#424242] px-3 py-1.5 text-xs text-white/70">
+                      {selectedModel?.displayName || "Gemini Flash"}
+                    </span>
+                  </div>
 
                   <button
                     type="submit"
-                    disabled={isLoading || !input.trim()}
+                    disabled={
+                      isLoading || (!input.trim() && attachedFiles.length === 0)
+                    }
                     className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-lg text-black hover:bg-white/90 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     ↑
@@ -745,18 +972,6 @@ if (!data.isGuest) {
                 </div>
               </div>
             </form>
-
-            <div className="mt-5 grid w-full gap-3 sm:grid-cols-2">
-              {SUGGESTIONS.map((item) => (
-                <button
-                  key={item}
-                  onClick={() => sendMessage(item)}
-                  className="rounded-2xl border border-white/10 bg-[#2a2a2a] px-4 py-3 text-left text-sm text-white/70 hover:bg-[#333333] hover:text-white"
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
           </div>
         ) : (
           <>
@@ -766,7 +981,25 @@ if (!data.isGuest) {
                   message.role === "USER" ? (
                     <div key={message.id} className="flex justify-end">
                       <div className="max-w-[80%] rounded-3xl bg-[#303030] px-5 py-3 text-[15px] leading-7">
-                        {message.content}
+                        {message.attachments &&
+                          message.attachments.length > 0 && (
+                            <div className="mb-3 flex flex-wrap gap-2">
+                              {message.attachments.map((file) => (
+                                <img
+                                  key={file.id}
+                                  src={file.dataUrl}
+                                  alt={file.name}
+                                  className="max-h-60 rounded-2xl border border-white/10 object-contain"
+                                />
+                              ))}
+                            </div>
+                          )}
+
+                        {message.content && (
+                          <div className="whitespace-pre-wrap">
+                            {message.content}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ) : (
@@ -831,6 +1064,7 @@ if (!data.isGuest) {
                   <textarea
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
+                    onPaste={handlePaste}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
@@ -843,14 +1077,32 @@ if (!data.isGuest) {
                     className="max-h-36 min-h-11 w-full resize-none bg-transparent px-4 py-3 text-[15px] outline-none placeholder:text-white/45"
                   />
 
+                  {attachmentPreview}
+
                   <div className="flex items-center justify-between px-2 pb-1">
-                    <span className="text-xs text-white/35">
-                      Gemini Flash · Free
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <label className="cursor-pointer rounded-full bg-[#424242] px-3 py-1.5 text-xs text-white/70 hover:bg-[#4a4a4a]">
+                        + Ảnh
+                        <input
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          className="hidden"
+                          onChange={handleFileChange}
+                        />
+                      </label>
+
+                      <span className="text-xs text-white/35">
+                        {selectedModel?.displayName || "Gemini Flash"}
+                      </span>
+                    </div>
 
                     <button
                       type="submit"
-                      disabled={isLoading || !input.trim()}
+                      disabled={
+                        isLoading ||
+                        (!input.trim() && attachedFiles.length === 0)
+                      }
                       className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-lg text-black hover:bg-white/90 disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       ↑

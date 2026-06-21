@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Navbar from "@/components/navbar";
+import HideNavbarOnVault from "@/components/hide-navbar-on-vault";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -15,7 +16,9 @@ export default function RootLayout({
   return (
     <html lang="vi">
       <body>
-        <Navbar />
+        <HideNavbarOnVault>
+          <Navbar />
+        </HideNavbarOnVault>
         {children}
       </body>
     </html>

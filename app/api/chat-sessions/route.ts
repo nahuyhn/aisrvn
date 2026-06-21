@@ -26,6 +26,13 @@ export async function GET() {
       return Response.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    if (user.status === "BANNED") {
+  return Response.json(
+    { error: "Tài khoản của bạn đã bị khóa." },
+    { status: 403 }
+  );
+}
+
     const sessions = await prisma.chatSession.findMany({
       where: {
         userId: user.id,
