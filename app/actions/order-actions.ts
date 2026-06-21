@@ -32,7 +32,16 @@ function getPayOSDescription(paymentCode: number) {
   return `AIWRAP ${paymentCode}`.slice(0, 25);
 }
 
-export async function createOrder(planId: string) {
+export async function createOrder(
+  planId: string,
+  formData: FormData
+) {const termsAccepted = formData.get("termsAccepted") === "on";
+
+if (!termsAccepted) {
+  throw new Error(
+    "Bạn cần đồng ý Điều khoản dịch vụ trước khi thanh toán."
+  );
+}
   const session = await getServerSession(authOptions);
 
   if (!session?.user?.email) {

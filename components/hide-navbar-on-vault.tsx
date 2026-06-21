@@ -9,7 +9,12 @@ export default function HideNavbarOnVault({
 }) {
   const pathname = usePathname();
 
-  if (pathname.startsWith("/vault-hbn")) {
+  const shouldHideNavbar =
+    pathname === "/chat" ||
+    pathname.startsWith("/chat/") ||
+    pathname.startsWith("/vault-hbn");
+
+  if (shouldHideNavbar) {
     return null;
   }
 

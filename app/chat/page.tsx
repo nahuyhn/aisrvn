@@ -1,7 +1,11 @@
+
 "use client";
 
+import Link from "next/link";
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSession } from "next-auth/react";
+import Image from "next/image";
 
 type Project = {
   id: string;
@@ -50,8 +54,67 @@ type AiModel = {
   sortOrder: number;
 };
 
+type ApiError = {
+  error?: string;
+};
+
+type ProjectsResponse = ApiError & {
+  projects?: Project[];
+  project?: Project;
+};
+
+type SessionsResponse = ApiError & {
+  sessions?: ChatSession[];
+};
+
+type ModelsResponse = ApiError & {
+  models?: AiModel[];
+};
+
+type ChatSessionDetailResponse = ApiError & {
+  chatSession?: ChatSession & {
+    messages?: ChatMessage[];
+  };
+};
+
+type SendMessageResponse = ApiError & {
+  answer?: string;
+  sessionId?: string;
+  isGuest?: boolean;
+  chatSession?: ChatSession;
+};
+
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+const MAX_IMAGE_COUNT = 4;
+
+async function readJson<T>(response: Response, apiName: string): Promise<T> {
+  const rawText = await response.text();
+
+  if (!rawText) {
+    return {} as T;
+  }
+
+  try {
+    return JSON.parse(rawText) as T;
+  } catch {
+    throw new Error(
+      `${apiName} không trả về JSON hợp lệ. Status: ${
+        response.status
+      }. Response: ${rawText.slice(0, 200)}`
+    );
+  }
+}
+
 export default function ChatPage() {
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const { data: session } = useSession();
+
+const displayName =
+  session?.user?.name?.trim() ||
+  session?.user?.email?.split("@")[0] ||
+  "Người dùng";
+
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
@@ -72,172 +135,195 @@ export default function ChatPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingData, setIsLoadingData] = useState(true);
   const [errorText, setErrorText] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const activeProject = useMemo(() => {
     return projects.find((project) => project.id === activeProjectId) || null;
   }, [projects, activeProjectId]);
 
   const selectedModel = useMemo(() => {
-  return models.find((model) => model.id === selectedModelId) || models[0] || null;
-}, [models, selectedModelId]);
+    return (
+      models.find((model) => model.id === selectedModelId) ||
+      models[0] ||
+      null
+    );
+  }, [models, selectedModelId]);
 
   const filteredSessions = useMemo(() => {
-    return sessions.filter((session) => {
-      const matchSearch = session.title
-        .toLowerCase()
-        .includes(search.toLowerCase());
+    const normalizedSearch = search.trim().toLowerCase();
 
-      const matchProject = activeProjectId
+    return sessions.filter((session) => {
+      const matchesSearch =
+        !normalizedSearch ||
+        session.title.toLowerCase().includes(normalizedSearch);
+
+      const matchesProject = activeProjectId
         ? session.projectId === activeProjectId
         : true;
 
-      return matchSearch && matchProject;
+      return matchesSearch && matchesProject;
     });
   }, [sessions, search, activeProjectId]);
 
   useEffect(() => {
-    async function init() {
-      setIsLoadingData(true);
-      await Promise.all([loadProjects(), loadSessions(), loadModels()]);
-      setIsLoadingData(false);
+    const mediaQuery = window.matchMedia("(min-width: 768px)");
+
+    function syncSidebar() {
+      setSidebarOpen(mediaQuery.matches);
     }
 
-    init();
+    syncSidebar();
+    mediaQuery.addEventListener("change", syncSidebar);
+
+    return () => {
+      mediaQuery.removeEventListener("change", syncSidebar);
+    };
   }, []);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    async function init() {
+      setIsLoadingData(true);
+
+      await Promise.all([loadProjects(), loadSessions(), loadModels()]);
+
+      setIsLoadingData(false);
+    }
+
+    void init();
+  }, []);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "end",
+    });
   }, [messages, isLoading]);
+
+  function closeSidebarOnMobile() {
+    if (window.innerWidth < 768) {
+      setSidebarOpen(false);
+    }
+  }
+
+  function focusComposer() {
+    window.setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 50);
+  }
 
   async function loadProjects() {
     try {
-      const res = await fetch("/api/projects", {
+      const response = await fetch("/api/projects", {
         cache: "no-store",
       });
 
-      const rawText = await res.text();
+      const data = await readJson<ProjectsResponse>(
+        response,
+        "API /api/projects"
+      );
 
-      let data: any = {};
-
-      try {
-        data = rawText ? JSON.parse(rawText) : {};
-      } catch {
-        throw new Error(
-          `API /api/projects không trả JSON. Status: ${
-            res.status
-          }. Response: ${rawText.slice(0, 200)}`
-        );
-      }
-
-      if (!res.ok) {
-        if (res.status === 401) {
+      if (!response.ok) {
+        if (response.status === 401) {
           setProjects([]);
           setActiveProjectId(null);
-          setErrorText("");
           return;
         }
 
         throw new Error(
-          data.error || `Không tải được project. Status: ${res.status}`
+          data.error ||
+            `Không tải được danh sách dự án. Status: ${response.status}`
         );
       }
 
       setProjects(data.projects || []);
-      setErrorText("");
     } catch (error) {
       console.error("LOAD_PROJECTS_ERROR:", error);
 
       setErrorText(
         error instanceof Error
           ? error.message
-          : "Không tải được danh sách project."
+          : "Không tải được danh sách dự án."
+      );
+    }
+  }
+
+  async function loadSessions() {
+    try {
+      const response = await fetch("/api/chat-sessions", {
+        cache: "no-store",
+      });
+
+      const data = await readJson<SessionsResponse>(
+        response,
+        "API /api/chat-sessions"
+      );
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          setSessions([]);
+          return;
+        }
+
+        throw new Error(
+          data.error ||
+            `Không tải được lịch sử chat. Status: ${response.status}`
+        );
+      }
+
+      setSessions(data.sessions || []);
+    } catch (error) {
+      console.error("LOAD_SESSIONS_ERROR:", error);
+
+      setErrorText(
+        error instanceof Error
+          ? error.message
+          : "Không tải được lịch sử chat."
       );
     }
   }
 
   async function loadModels() {
-  try {
-    const res = await fetch("/api/models", {
-      cache: "no-store",
-    });
-
-    const rawText = await res.text();
-
-    let data: any = {};
-
     try {
-      data = rawText ? JSON.parse(rawText) : {};
-    } catch {
-      throw new Error(
-        `API /api/models không trả JSON. Status: ${
-          res.status
-        }. Response: ${rawText.slice(0, 200)}`
-      );
-    }
-
-    if (!res.ok) {
-      throw new Error(data.error || "Không tải được danh sách model.");
-    }
-
-    const nextModels: AiModel[] = data.models || [];
-
-    setModels(nextModels);
-
-    if (!selectedModelId && nextModels.length > 0) {
-      setSelectedModelId(nextModels[0].id);
-    }
-  } catch (error) {
-    console.error("LOAD_MODELS_ERROR:", error);
-
-    setErrorText(
-      error instanceof Error
-        ? error.message
-        : "Không tải được danh sách model."
-    );
-  }
-}
-
-  async function loadSessions() {
-    try {
-      const res = await fetch("/api/chat-sessions", {
+      const response = await fetch("/api/models", {
         cache: "no-store",
       });
 
-      const rawText = await res.text();
+      const data = await readJson<ModelsResponse>(
+        response,
+        "API /api/models"
+      );
 
-      let data: any = {};
-
-      try {
-        data = rawText ? JSON.parse(rawText) : {};
-      } catch {
+      if (!response.ok) {
         throw new Error(
-          `API /api/chat-sessions không trả JSON. Status: ${
-            res.status
-          }. Response: ${rawText.slice(0, 200)}`
+          data.error || "Không tải được danh sách model AI."
         );
       }
 
-      if (!res.ok) {
-        if (res.status === 401) {
-          setSessions([]);
-          setErrorText("");
-          return;
+      const nextModels = data.models || [];
+
+      setModels(nextModels);
+
+      setSelectedModelId((currentModelId) => {
+        const currentModelStillExists = nextModels.some(
+          (model) => model.id === currentModelId
+        );
+
+        if (currentModelStillExists) {
+          return currentModelId;
         }
 
-        throw new Error(
-          data.error || `Không tải được lịch sử chat. Status: ${res.status}`
-        );
-      }
-
-      setSessions(data.sessions || []);
-      setErrorText("");
+        return nextModels[0]?.id || null;
+      });
     } catch (error) {
-      console.error("LOAD_SESSIONS_ERROR:", error);
+      console.error("LOAD_MODELS_ERROR:", error);
 
       setErrorText(
-        error instanceof Error ? error.message : "Không tải được lịch sử chat."
+        error instanceof Error
+          ? error.message
+          : "Không tải được danh sách model AI."
       );
     }
   }
@@ -245,10 +331,13 @@ export default function ChatPage() {
   async function createProject() {
     const name = newProjectName.trim();
 
-    if (!name) return;
+    if (!name) {
+      setErrorText("Hãy nhập tên dự án.");
+      return;
+    }
 
     try {
-      const res = await fetch("/api/projects", {
+      const response = await fetch("/api/projects", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -256,19 +345,28 @@ export default function ChatPage() {
         body: JSON.stringify({ name }),
       });
 
-      const rawText = await res.text();
-      const data = rawText ? JSON.parse(rawText) : {};
+      const data = await readJson<ProjectsResponse>(
+        response,
+        "API tạo dự án"
+      );
 
-      if (!res.ok) {
-        if (res.status === 401) {
-          setErrorText("Bạn cần đăng nhập để tạo project.");
-          return;
+      if (!response.ok) {
+        if (response.status === 401) {
+          throw new Error("Bạn cần đăng nhập để tạo dự án.");
         }
 
-        throw new Error(data.error || "Không tạo được project.");
+        throw new Error(data.error || "Không tạo được dự án.");
       }
 
-      setProjects((prev) => [data.project, ...prev]);
+      if (!data.project) {
+        throw new Error("API không trả về dự án vừa tạo.");
+      }
+
+      setProjects((previousProjects) => [
+        data.project as Project,
+        ...previousProjects,
+      ]);
+
       setActiveProjectId(data.project.id);
       setActiveSessionId(null);
       setMessages([]);
@@ -276,32 +374,40 @@ export default function ChatPage() {
       setNewProjectName("");
       setShowProjectInput(false);
       setErrorText("");
+
+      closeSidebarOnMobile();
+      focusComposer();
     } catch (error) {
       setErrorText(
-        error instanceof Error ? error.message : "Không tạo được project."
+        error instanceof Error ? error.message : "Không tạo được dự án."
       );
     }
   }
 
   async function deleteProject(projectId: string) {
-    const ok = confirm(
-      "Bạn có chắc muốn xóa project này không? Chat trong project sẽ được chuyển về Tất cả chat."
+    const confirmed = window.confirm(
+      "Bạn có chắc muốn xóa dự án này không? Các cuộc trò chuyện sẽ được chuyển về mục Tất cả."
     );
 
-    if (!ok) return;
+    if (!confirmed) return;
 
     try {
-      const res = await fetch(`/api/projects/${projectId}`, {
+      const response = await fetch(`/api/projects/${projectId}`, {
         method: "DELETE",
       });
 
-      const data = await res.json();
+      const data = await readJson<ApiError>(
+        response,
+        "API xóa dự án"
+      );
 
-      if (!res.ok) {
-        throw new Error(data.error || "Không xóa được project.");
+      if (!response.ok) {
+        throw new Error(data.error || "Không xóa được dự án.");
       }
 
-      setProjects((prev) => prev.filter((project) => project.id !== projectId));
+      setProjects((previousProjects) =>
+        previousProjects.filter((project) => project.id !== projectId)
+      );
 
       if (activeProjectId === projectId) {
         setActiveProjectId(null);
@@ -314,48 +420,79 @@ export default function ChatPage() {
       setErrorText("");
     } catch (error) {
       setErrorText(
-        error instanceof Error ? error.message : "Không xóa được project."
+        error instanceof Error ? error.message : "Không xóa được dự án."
       );
     }
   }
 
   function startNewChat(projectId?: string | null) {
+    const nextProjectId =
+      projectId === undefined ? activeProjectId : projectId;
+
     setActiveSessionId(null);
-    setActiveProjectId(projectId ?? activeProjectId);
+    setActiveProjectId(nextProjectId);
     setMessages([]);
     setInput("");
     setAttachedFiles([]);
     setErrorText("");
+
+    closeSidebarOnMobile();
+    focusComposer();
+  }
+
+  function selectProject(projectId: string) {
+    setActiveProjectId(projectId);
+    setActiveSessionId(null);
+    setMessages([]);
+    setAttachedFiles([]);
+    setErrorText("");
+
+    closeSidebarOnMobile();
+    focusComposer();
+  }
+
+  function selectAllChats() {
+    setActiveProjectId(null);
+    setActiveSessionId(null);
+    setMessages([]);
+    setAttachedFiles([]);
+    setErrorText("");
+
+    closeSidebarOnMobile();
+    focusComposer();
   }
 
   async function openSession(sessionId: string) {
     try {
       setErrorText("");
 
-      const res = await fetch(`/api/chat-sessions/${sessionId}`, {
+      const response = await fetch(`/api/chat-sessions/${sessionId}`, {
         cache: "no-store",
       });
 
-      const rawText = await res.text();
+      const data = await readJson<ChatSessionDetailResponse>(
+        response,
+        "API mở cuộc trò chuyện"
+      );
 
-      let data: any = {};
-
-      try {
-        data = rawText ? JSON.parse(rawText) : {};
-      } catch {
+      if (!response.ok) {
         throw new Error(
-          "API mở lịch sử chat không trả về JSON. Kiểm tra file app/api/chat-sessions/[id]/route.ts."
+          data.error || "Không mở được cuộc trò chuyện."
         );
       }
 
-      if (!res.ok) {
-        throw new Error(data.error || "Không mở được cuộc trò chuyện.");
+      if (!data.chatSession) {
+        throw new Error("Không tìm thấy dữ liệu cuộc trò chuyện.");
       }
 
       setActiveSessionId(data.chatSession.id);
       setActiveProjectId(data.chatSession.projectId || null);
       setMessages(data.chatSession.messages || []);
       setAttachedFiles([]);
+      setErrorText("");
+
+      closeSidebarOnMobile();
+      focusComposer();
     } catch (error) {
       setErrorText(
         error instanceof Error
@@ -366,35 +503,30 @@ export default function ChatPage() {
   }
 
   async function deleteSession(sessionId: string) {
-    const ok = confirm("Bạn có chắc muốn xóa cuộc trò chuyện này không?");
+    const confirmed = window.confirm(
+      "Bạn có chắc muốn xóa cuộc trò chuyện này không?"
+    );
 
-    if (!ok) return;
+    if (!confirmed) return;
 
     try {
-      const res = await fetch(`/api/chat-sessions/${sessionId}`, {
+      const response = await fetch(`/api/chat-sessions/${sessionId}`, {
         method: "DELETE",
       });
 
-      const rawText = await res.text();
+      const data = await readJson<ApiError>(
+        response,
+        "API xóa cuộc trò chuyện"
+      );
 
-      let data: any = {};
-
-      try {
-        data = rawText ? JSON.parse(rawText) : {};
-      } catch {
+      if (!response.ok) {
         throw new Error(
-          `API xóa chat không trả JSON. Status: ${
-            res.status
-          }. Response: ${rawText.slice(0, 200)}`
+          data.error || "Không xóa được cuộc trò chuyện."
         );
       }
 
-      if (!res.ok) {
-        throw new Error(data.error || "Không xóa được cuộc trò chuyện.");
-      }
-
-      setSessions((prev) =>
-        prev.filter((session) => session.id !== sessionId)
+      setSessions((previousSessions) =>
+        previousSessions.filter((session) => session.id !== sessionId)
       );
 
       if (activeSessionId === sessionId) {
@@ -416,10 +548,10 @@ export default function ChatPage() {
   }
 
   function addImageFile(file: File) {
-    const maxSize = 10 * 1024 * 1024;
-
-    if (file.size > maxSize) {
-      setErrorText(`Ảnh "${file.name || "clipboard-image"}" vượt quá 10MB.`);
+    if (file.size > MAX_IMAGE_SIZE) {
+      setErrorText(
+        `Ảnh "${file.name || "clipboard-image"}" vượt quá 10MB.`
+      );
       return;
     }
 
@@ -430,8 +562,8 @@ export default function ChatPage() {
 
       if (typeof result !== "string") return;
 
-      setAttachedFiles((prev) => [
-        ...prev,
+      setAttachedFiles((previousFiles) => [
+        ...previousFiles,
         {
           id: crypto.randomUUID(),
           name: file.name || `pasted-image-${Date.now()}.png`,
@@ -445,33 +577,78 @@ export default function ChatPage() {
     reader.readAsDataURL(file);
   }
 
-  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+  function handleFileChange(
+    event: React.ChangeEvent<HTMLInputElement>
+  ) {
     const files = Array.from(event.target.files || []);
+
+    event.target.value = "";
 
     if (files.length === 0) return;
 
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (!selectedModel?.supportsImage) {
+      setErrorText("Model đang chọn chưa hỗ trợ đọc ảnh.");
+      return;
+    }
+
+    const imageFiles = files.filter((file) =>
+      file.type.startsWith("image/")
+    );
 
     if (imageFiles.length !== files.length) {
+      setErrorText("Hiện tại AI SITIKI chỉ hỗ trợ đính kèm ảnh.");
+    }
+
+    const availableSlots = Math.max(
+      0,
+      MAX_IMAGE_COUNT - attachedFiles.length
+    );
+
+    if (availableSlots === 0) {
+      setErrorText(`Mỗi tin nhắn chỉ được gửi tối đa ${MAX_IMAGE_COUNT} ảnh.`);
+      return;
+    }
+
+    if (imageFiles.length > availableSlots) {
       setErrorText(
-        "Hiện tại chỉ hỗ trợ gửi ảnh. File PDF/DOC/TXT sẽ làm ở bước sau."
+        `Mỗi tin nhắn chỉ được gửi tối đa ${MAX_IMAGE_COUNT} ảnh.`
       );
     }
 
-    imageFiles.forEach(addImageFile);
-
-    event.target.value = "";
+    imageFiles.slice(0, availableSlots).forEach(addImageFile);
   }
 
-  function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+  function handlePaste(
+    event: React.ClipboardEvent<HTMLTextAreaElement>
+  ) {
     const items = Array.from(event.clipboardData.items);
-    const imageItems = items.filter((item) => item.type.startsWith("image/"));
+
+    const imageItems = items.filter((item) =>
+      item.type.startsWith("image/")
+    );
 
     if (imageItems.length === 0) return;
 
+    if (!selectedModel?.supportsImage) {
+      event.preventDefault();
+      setErrorText("Model đang chọn chưa hỗ trợ đọc ảnh.");
+      return;
+    }
+
+    const availableSlots = Math.max(
+      0,
+      MAX_IMAGE_COUNT - attachedFiles.length
+    );
+
+    if (availableSlots === 0) {
+      event.preventDefault();
+      setErrorText(`Mỗi tin nhắn chỉ được gửi tối đa ${MAX_IMAGE_COUNT} ảnh.`);
+      return;
+    }
+
     event.preventDefault();
 
-    imageItems.forEach((item) => {
+    imageItems.slice(0, availableSlots).forEach((item) => {
       const file = item.getAsFile();
 
       if (file) {
@@ -481,37 +658,73 @@ export default function ChatPage() {
   }
 
   function removeAttachedFile(fileId: string) {
-    setAttachedFiles((prev) => prev.filter((file) => file.id !== fileId));
+    setAttachedFiles((previousFiles) =>
+      previousFiles.filter((file) => file.id !== fileId)
+    );
   }
 
-  async function sendMessage(text?: string) {
-    const messageText = (text || input).trim();
+  async function copyMessage(messageId: string, content: string) {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessageId(messageId);
 
-    if ((!messageText && attachedFiles.length === 0) || isLoading) return;
+      window.setTimeout(() => {
+        setCopiedMessageId((currentId) =>
+          currentId === messageId ? null : currentId
+        );
+      }, 1500);
+    } catch {
+      setErrorText("Không sao chép được nội dung.");
+    }
+  }
 
-    const messageAttachments = attachedFiles.map((file) => ({
-      id: file.id,
-      name: file.name,
-      type: file.type,
-      dataUrl: file.dataUrl,
-    }));
+  async function sendMessage(customText?: string) {
+    const messageText = (customText ?? input).trim();
+
+    if ((!messageText && attachedFiles.length === 0) || isLoading) {
+      return;
+    }
+
+    if (!selectedModelId) {
+      setErrorText("Hiện chưa có model AI khả dụng.");
+      return;
+    }
+
+    if (attachedFiles.length > 0 && !selectedModel?.supportsImage) {
+      setErrorText("Model đang chọn chưa hỗ trợ đọc ảnh.");
+      return;
+    }
+
+    const messageAttachments: ChatAttachment[] = attachedFiles.map(
+      (file) => ({
+        id: file.id,
+        name: file.name,
+        type: file.type,
+        dataUrl: file.dataUrl,
+      })
+    );
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "USER",
       content:
-        messageText || (messageAttachments.length > 0 ? "Đã gửi ảnh." : ""),
+        messageText ||
+        (messageAttachments.length > 0 ? "Đã gửi ảnh." : ""),
       attachments: messageAttachments,
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    setMessages((previousMessages) => [
+      ...previousMessages,
+      userMessage,
+    ]);
+
     setInput("");
     setAttachedFiles([]);
     setIsLoading(true);
     setErrorText("");
 
     try {
-      const res = await fetch("/api/chat", {
+      const response = await fetch("/api/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -533,32 +746,36 @@ export default function ChatPage() {
         }),
       });
 
-      const rawText = await res.text();
+      const data = await readJson<SendMessageResponse>(
+        response,
+        "API chat"
+      );
 
-      let data: any = {};
-
-      try {
-        data = rawText ? JSON.parse(rawText) : {};
-      } catch {
-        throw new Error(rawText || "API không trả về JSON hợp lệ.");
+      if (!response.ok) {
+        throw new Error(
+          data.error || "Không thể nhận phản hồi từ AI."
+        );
       }
 
-      if (!res.ok) {
-        throw new Error(data.error || "Chat failed");
+      if (!data.answer) {
+        throw new Error("AI không trả về nội dung.");
       }
 
       if (data.isGuest) {
         setActiveSessionId(null);
-      } else {
+      } else if (data.sessionId) {
         setActiveSessionId(data.sessionId);
 
         if (data.chatSession) {
-          setSessions((prev) => {
-            const rest = prev.filter(
-              (session) => session.id !== data.chatSession.id
+          setSessions((previousSessions) => {
+            const remainingSessions = previousSessions.filter(
+              (session) => session.id !== data.chatSession?.id
             );
 
-            return [data.chatSession, ...rest];
+            return [
+              data.chatSession as ChatSession,
+              ...remainingSessions,
+            ];
           });
         }
       }
@@ -569,7 +786,10 @@ export default function ChatPage() {
         content: data.answer,
       };
 
-      setMessages((prev) => [...prev, assistantMessage]);
+      setMessages((previousMessages) => [
+        ...previousMessages,
+        assistantMessage,
+      ]);
 
       if (!data.isGuest) {
         await loadSessions();
@@ -578,99 +798,200 @@ export default function ChatPage() {
       const message =
         error instanceof Error
           ? error.message
-          : "Có lỗi khi gọi AI. Hãy kiểm tra Gemini API key.";
+          : "Không thể nhận phản hồi từ AI. Vui lòng thử lại.";
 
       setErrorText(message);
 
-      setMessages((prev) => [
-        ...prev,
+      setMessages((previousMessages) => [
+        ...previousMessages,
         {
           id: crypto.randomUUID(),
           role: "ASSISTANT",
-          content: `Có lỗi khi gọi AI: ${message}`,
+          content: `Không thể trả lời: ${message}`,
         },
       ]);
     } finally {
       setIsLoading(false);
+      focusComposer();
     }
   }
 
-  const attachmentPreview = attachedFiles.length > 0 && (
-    <div className="flex flex-wrap gap-2 px-3 pb-3">
-      {attachedFiles.map((file) => (
-        <div
-          key={file.id}
-          className="relative h-20 w-20 overflow-hidden rounded-xl border border-white/10 bg-black/30"
-        >
-          <img
-            src={file.dataUrl}
-            alt={file.name}
-            className="h-full w-full object-cover"
-          />
-
-          <button
-            type="button"
-            onClick={() => removeAttachedFile(file.id)}
-            className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-xs text-white hover:bg-red-500"
+  const attachmentPreview =
+    attachedFiles.length > 0 ? (
+      <div className="flex flex-wrap gap-2 px-3 pb-3">
+        {attachedFiles.map((file) => (
+          <div
+            key={file.id}
+            className="relative h-20 w-20 overflow-hidden rounded-xl border border-white/10 bg-black/30"
           >
-            ×
-          </button>
+            <img
+              src={file.dataUrl}
+              alt={file.name}
+              className="h-full w-full object-cover"
+            />
+
+            <button
+              type="button"
+              onClick={() => removeAttachedFile(file.id)}
+              className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/75 text-sm text-white transition hover:bg-red-500"
+              aria-label={`Xóa ảnh ${file.name}`}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+    ) : null;
+
+  const composer = (
+    <div className="rounded-[26px] border border-white/5 bg-[#303030] p-2 shadow-2xl">
+      <textarea
+        ref={textareaRef}
+        value={input}
+        onChange={(event) => setInput(event.target.value)}
+        onPaste={handlePaste}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            void sendMessage();
+          }
+        }}
+        rows={messages.length === 0 ? 3 : 1}
+        disabled={isLoading}
+        placeholder="Nhắn tin cho AI SITIKI"
+        className={`w-full resize-none bg-transparent px-4 py-3 text-[15px] text-white outline-none placeholder:text-white/40 ${
+          messages.length === 0
+            ? "min-h-24"
+            : "max-h-40 min-h-11"
+        }`}
+      />
+
+      {attachmentPreview}
+
+      <div className="flex items-center justify-between gap-3 px-2 pb-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <label
+            className={`rounded-full px-3 py-1.5 text-xs transition ${
+              selectedModel?.supportsImage
+                ? "cursor-pointer bg-[#424242] text-white/70 hover:bg-[#4a4a4a]"
+                : "cursor-not-allowed bg-white/5 text-white/25"
+            }`}
+            title={
+              selectedModel?.supportsImage
+                ? "Đính kèm ảnh"
+                : "Model này chưa hỗ trợ ảnh"
+            }
+          >
+            + Ảnh
+
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              disabled={!selectedModel?.supportsImage}
+              className="hidden"
+              onChange={handleFileChange}
+            />
+          </label>
+
+          <span className="max-w-[150px] truncate text-xs text-white/35 sm:max-w-[240px]">
+            {selectedModel?.displayName || "Đang tải model..."}
+          </span>
         </div>
-      ))}
+
+        <button
+          type="button"
+          onClick={() => void sendMessage()}
+          disabled={
+            isLoading ||
+            !selectedModelId ||
+            (!input.trim() && attachedFiles.length === 0)
+          }
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white text-lg text-black transition hover:bg-white/85 disabled:cursor-not-allowed disabled:opacity-35"
+          aria-label="Gửi tin nhắn"
+        >
+          ↑
+        </button>
+      </div>
     </div>
   );
 
   return (
-    <main className="flex min-h-screen bg-[#212121] text-white">
+    <main className="flex min-h-[100dvh] overflow-x-hidden bg-[#212121] text-white">
+      {sidebarOpen && (
+        <button
+          type="button"
+          onClick={() => setSidebarOpen(false)}
+          className="fixed inset-0 z-40 bg-black/60 md:hidden"
+          aria-label="Đóng danh sách trò chuyện"
+        />
+      )}
+
       <aside
-        className={`fixed left-0 top-0 z-50 flex h-screen flex-col border-r border-white/10 bg-black transition-all duration-300 ${
-          sidebarOpen ? "w-[280px]" : "w-0 overflow-hidden"
+        className={`fixed left-0 top-0 z-50 flex h-[100dvh] w-[280px] flex-col border-r border-white/10 bg-black transition-transform duration-300 ${
+          sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        <div className="flex h-full w-[280px] flex-col px-3 py-4">
+        <div className="flex h-full flex-col px-3 py-4">
           <div className="mb-5 flex items-center justify-between px-2">
             <button
-              onClick={() => startNewChat(activeProjectId)}
-              className="text-xl font-semibold hover:text-white/80"
+              type="button"
+              onClick={() => startNewChat(null)}
+              className="text-left transition hover:opacity-80"
             >
-              AI Wrapper
+              <span className="block text-lg font-bold tracking-tight">
+                AI SITIKI
+              </span>
+
+              <span className="block text-[10px] text-white/40">
+                AI siêu tiết kiệm
+              </span>
             </button>
 
             <button
+              type="button"
               onClick={() => setSidebarOpen(false)}
-              className="rounded-lg p-2 text-white/60 hover:bg-white/10 hover:text-white"
-              title="Đóng sidebar"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-white/50 transition hover:bg-white/10 hover:text-white"
+              title="Thu gọn"
+              aria-label="Thu gọn danh sách trò chuyện"
             >
-              ◧
+              ‹
             </button>
           </div>
 
           <button
-            onClick={() => startNewChat(activeProjectId)}
-            className="mb-2 flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[15px] hover:bg-white/10"
+            type="button"
+            onClick={() => startNewChat()}
+            className="mb-2 flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[15px] transition hover:bg-white/10"
           >
             <span className="text-lg">✎</span>
-            <span>New chat</span>
+            <span>Chat mới</span>
           </button>
 
-          <div className="mb-5 flex items-center gap-3 rounded-xl px-3 py-2.5 hover:bg-white/10">
-            <span className="text-lg">⌕</span>
+          <div className="mb-5 flex items-center gap-3 rounded-xl px-3 py-2.5 transition focus-within:bg-white/10 hover:bg-white/10">
+            <span className="text-lg text-white/50">⌕</span>
+
             <input
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search chats"
-              className="w-full bg-transparent text-[15px] text-white outline-none placeholder:text-white/45"
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Tìm cuộc trò chuyện"
+              className="w-full bg-transparent text-[15px] text-white outline-none placeholder:text-white/40"
             />
           </div>
 
-          <div className="mb-6">
+          <div className="mb-5">
             <div className="mb-2 flex items-center justify-between px-3">
-              <p className="text-sm font-semibold text-white/80">Projects</p>
+              <p className="text-sm font-semibold text-white/75">
+                Dự án
+              </p>
 
               <button
-                onClick={() => setShowProjectInput((prev) => !prev)}
-                className="rounded-md px-2 py-1 text-sm text-white/60 hover:bg-white/10 hover:text-white"
-                title="Tạo project"
+                type="button"
+                onClick={() =>
+                  setShowProjectInput((previousValue) => !previousValue)
+                }
+                className="rounded-lg px-2 py-1 text-sm text-white/50 transition hover:bg-white/10 hover:text-white"
+                title="Tạo dự án"
               >
                 +
               </button>
@@ -680,28 +1001,35 @@ export default function ChatPage() {
               <div className="mb-2 rounded-xl bg-[#202020] p-2">
                 <input
                   value={newProjectName}
-                  onChange={(e) => setNewProjectName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") createProject();
+                  onChange={(event) =>
+                    setNewProjectName(event.target.value)
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      void createProject();
+                    }
                   }}
-                  placeholder="Tên project..."
-                  className="w-full rounded-lg bg-[#303030] px-3 py-2 text-sm text-white outline-none placeholder:text-white/40"
+                  placeholder="Tên dự án"
+                  className="w-full rounded-lg bg-[#303030] px-3 py-2 text-sm text-white outline-none placeholder:text-white/35"
+                  autoFocus
                 />
 
                 <div className="mt-2 flex gap-2">
                   <button
-                    onClick={createProject}
-                    className="flex-1 rounded-lg bg-white px-3 py-2 text-xs font-medium text-black hover:bg-white/90"
+                    type="button"
+                    onClick={() => void createProject()}
+                    className="flex-1 rounded-lg bg-white px-3 py-2 text-xs font-medium text-black transition hover:bg-white/85"
                   >
                     Tạo
                   </button>
 
                   <button
+                    type="button"
                     onClick={() => {
                       setShowProjectInput(false);
                       setNewProjectName("");
                     }}
-                    className="flex-1 rounded-lg bg-white/10 px-3 py-2 text-xs text-white hover:bg-white/15"
+                    className="flex-1 rounded-lg bg-white/10 px-3 py-2 text-xs text-white transition hover:bg-white/15"
                   >
                     Hủy
                   </button>
@@ -711,58 +1039,51 @@ export default function ChatPage() {
 
             <div className="space-y-1">
               <button
-                onClick={() => {
-                  setActiveProjectId(null);
-                  setActiveSessionId(null);
-                  setMessages([]);
-                  setAttachedFiles([]);
-                }}
-                className={`w-full truncate rounded-xl px-3 py-2.5 text-left text-sm ${
+                type="button"
+                onClick={selectAllChats}
+                className={`w-full truncate rounded-xl px-3 py-2.5 text-left text-sm transition ${
                   activeProjectId === null
                     ? "bg-[#303030] text-white"
-                    : "text-white/60 hover:bg-white/10 hover:text-white"
+                    : "text-white/55 hover:bg-white/10 hover:text-white"
                 }`}
               >
-                Tất cả chat
+                Tất cả
               </button>
 
               {projects.length === 0 ? (
-                <p className="px-3 py-2 text-sm text-white/35">
-                  Chưa có project
+                <p className="px-3 py-2 text-sm text-white/30">
+                  Chưa có dự án
                 </p>
               ) : (
                 projects.map((project) => (
                   <div
                     key={project.id}
-                    className={`group flex items-center rounded-xl ${
+                    className={`group flex items-center rounded-xl transition ${
                       activeProjectId === project.id
                         ? "bg-[#303030] text-white"
-                        : "text-white/60 hover:bg-white/10 hover:text-white"
+                        : "text-white/55 hover:bg-white/10 hover:text-white"
                     }`}
                   >
                     <button
-                      onClick={() => {
-                        setActiveProjectId(project.id);
-                        setActiveSessionId(null);
-                        setMessages([]);
-                        setAttachedFiles([]);
-                      }}
+                      type="button"
+                      onClick={() => selectProject(project.id)}
                       className="min-w-0 flex-1 truncate px-3 py-2.5 text-left text-sm"
                       title={project.name}
                     >
-                      <span className="mr-2">📁</span>
+                      <span className="mr-2">▱</span>
                       {project.name}
                     </button>
 
                     <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteProject(project.id);
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void deleteProject(project.id);
                       }}
-                      className="mr-2 hidden rounded-md px-2 py-1 text-xs text-white/45 hover:bg-white/10 hover:text-red-300 group-hover:block"
-                      title="Xóa project"
+                      className="mr-2 hidden rounded-md px-2 py-1 text-xs text-white/40 transition hover:bg-white/10 hover:text-red-300 group-hover:block"
+                      title="Xóa dự án"
                     >
-                      ✕
+                      ×
                     </button>
                   </div>
                 ))
@@ -770,38 +1091,39 @@ export default function ChatPage() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto">
-            <p className="mb-2 px-3 text-sm font-semibold text-white/80">
-              Chats
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <p className="mb-2 px-3 text-sm font-semibold text-white/75">
+              Lịch sử
             </p>
 
             {isLoadingData ? (
-              <div className="space-y-2 px-3">
+              <div className="space-y-3 px-3 py-2">
                 <div className="h-4 w-4/5 animate-pulse rounded bg-white/10" />
                 <div className="h-4 w-3/5 animate-pulse rounded bg-white/10" />
                 <div className="h-4 w-2/3 animate-pulse rounded bg-white/10" />
               </div>
             ) : filteredSessions.length === 0 ? (
-              <p className="px-3 py-2 text-sm leading-5 text-white/35">
+              <p className="px-3 py-2 text-sm leading-5 text-white/30">
                 {search
-                  ? "Không tìm thấy chat"
+                  ? "Không tìm thấy"
                   : activeProjectId
-                    ? "Project này chưa có chat"
-                    : "Chưa có lịch sử chat"}
+                    ? "Dự án chưa có chat"
+                    : "Chưa có lịch sử"}
               </p>
             ) : (
               <div className="space-y-1">
                 {filteredSessions.map((session) => (
                   <div
                     key={session.id}
-                    className={`group flex items-center rounded-xl ${
+                    className={`group flex items-center rounded-xl transition ${
                       activeSessionId === session.id
                         ? "bg-[#303030] text-white"
-                        : "text-white/60 hover:bg-white/10 hover:text-white"
+                        : "text-white/55 hover:bg-white/10 hover:text-white"
                     }`}
                   >
                     <button
-                      onClick={() => openSession(session.id)}
+                      type="button"
+                      onClick={() => void openSession(session.id)}
                       className="min-w-0 flex-1 truncate px-3 py-2.5 text-left text-sm"
                       title={session.title}
                     >
@@ -809,14 +1131,15 @@ export default function ChatPage() {
                     </button>
 
                     <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteSession(session.id);
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void deleteSession(session.id);
                       }}
-                      className="mr-2 hidden rounded-md px-2 py-1 text-xs text-white/45 hover:bg-white/10 hover:text-red-300 group-hover:block"
-                      title="Xóa chat"
+                      className="mr-2 hidden rounded-md px-2 py-1 text-xs text-white/40 transition hover:bg-white/10 hover:text-red-300 group-hover:block"
+                      title="Xóa cuộc trò chuyện"
                     >
-                      ✕
+                      ×
                     </button>
                   </div>
                 ))}
@@ -824,38 +1147,43 @@ export default function ChatPage() {
             )}
           </div>
 
-          <div className="mt-auto border-t border-white/10 pt-3">
-            <a
-              href="/billing"
-              className="flex items-center gap-3 rounded-xl px-3 py-3 hover:bg-white/10"
-            >
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-500 text-xs font-semibold text-white">
-                U
-              </div>
+          <div className="mt-3 border-t border-white/10 pt-3">
+            <Link
+  href="/billing"
+  className="flex items-center gap-3 rounded-xl px-3 py-3 transition hover:bg-white/10"
+>
+  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-xs font-bold text-black">
+    {displayName.charAt(0).toUpperCase()}
+  </div>
 
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium leading-none">
-                  Tài khoản
-                </p>
-                <p className="mt-1 text-xs text-white/50">Free plan</p>
-              </div>
-            </a>
+  <div className="min-w-0">
+    <p className="truncate text-sm font-medium leading-none">
+      {displayName}
+    </p>
+
+    <p className="mt-1 truncate text-xs text-white/40">
+      Xem gói dịch vụ
+    </p>
+  </div>
+</Link>
           </div>
         </div>
       </aside>
 
       <section
-        className={`min-h-screen flex-1 transition-all duration-300 ${
-          sidebarOpen ? "pl-[280px]" : "pl-0"
+        className={`min-w-0 flex-1 transition-[padding] duration-300 ${
+          sidebarOpen ? "md:pl-[280px]" : "pl-0"
         }`}
       >
-        <header className="sticky top-0 z-30 flex h-16 items-center justify-between bg-[#212121]/90 px-4 backdrop-blur">
-          <div className="flex min-w-0 items-center gap-3">
+        <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-white/5 bg-[#212121]/90 px-3 backdrop-blur sm:px-4">
+          <div className="flex min-w-0 items-center gap-2">
             {!sidebarOpen && (
               <button
+                type="button"
                 onClick={() => setSidebarOpen(true)}
-                className="rounded-lg p-2 text-white/80 hover:bg-white/10 hover:text-white"
-                title="Mở sidebar"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-xl text-white/65 transition hover:bg-white/10 hover:text-white"
+                title="Mở danh sách trò chuyện"
+                aria-label="Mở danh sách trò chuyện"
               >
                 ☰
               </button>
@@ -863,175 +1191,227 @@ export default function ChatPage() {
 
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-  <select
-    value={selectedModelId || ""}
-    onChange={(e) => setSelectedModelId(e.target.value)}
-    className="rounded-xl border border-white/10 bg-[#303030] px-3 py-2 text-sm text-white outline-none"
-  >
-    {models.map((model) => (
-      <option key={model.id} value={model.id}>
-        {model.displayName}
-      </option>
-    ))}
-  </select>
+                <select
+                  value={selectedModelId || ""}
+                  onChange={(event) => {
+                    setSelectedModelId(event.target.value);
+                    setAttachedFiles([]);
+                    setErrorText("");
+                  }}
+                  disabled={models.length === 0}
+                  className="max-w-[175px] rounded-xl border border-white/10 bg-[#303030] px-3 py-2 text-sm text-white outline-none disabled:opacity-40 sm:max-w-[220px]"
+                  aria-label="Chọn model AI"
+                >
+                  {models.length === 0 ? (
+                    <option value="">Không có model</option>
+                  ) : (
+                    models.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.displayName}
+                      </option>
+                    ))
+                  )}
+                </select>
 
-  <span className="text-xs text-white/40">
-    {selectedModel?.category || "FREE"}
-  </span>
-</div>
+                {selectedModel?.isFree && (
+                  <span className="hidden rounded-full border border-white/10 px-2 py-1 text-[10px] text-white/40 sm:inline">
+                    MIỄN PHÍ
+                  </span>
+                )}
+              </div>
 
-              <p className="truncate text-xs text-white/40">
-                {activeProject
-                  ? `Project: ${activeProject.name}`
-                  : "Không thuộc project nào"}
-              </p>
+              {activeProject && (
+                <p className="mt-1 max-w-[190px] truncate text-xs text-white/35">
+                  {activeProject.name}
+                </p>
+              )}
             </div>
           </div>
 
-          <a
-            href="/pricing"
-            className="rounded-full bg-white px-4 py-2 text-sm font-medium text-black hover:bg-white/90"
-          >
-            Upgrade
-          </a>
+          <div className="flex items-center gap-1">
+            <Link
+              href="/billing"
+              className="hidden rounded-xl px-3 py-2 text-sm text-white/50 transition hover:bg-white/10 hover:text-white sm:inline-flex"
+            >
+              Thanh toán
+            </Link>
+
+            <Link
+              href="/terms"
+              className="hidden rounded-xl px-3 py-2 text-sm text-white/50 transition hover:bg-white/10 hover:text-white lg:inline-flex"
+            >
+              Điều khoản
+            </Link>
+
+            <Link
+              href="/billing#plans"
+              className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-black transition hover:bg-white/85 sm:px-4"
+            >
+              Nâng cấp
+            </Link>
+          </div>
         </header>
+
+        {selectedModel?.isFree && (
+          <div className="mx-auto mt-4 w-full max-w-3xl px-4">
+            <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">
+                  Đang dùng Gemini miễn phí
+                </p>
+
+                <p className="mt-1 text-xs leading-5 text-white/40">
+                  Phù hợp trải nghiệm cơ bản. Nâng cấp để dùng OpenAI.
+                </p>
+              </div>
+
+              <Link
+                href="/billing#plans"
+                className="shrink-0 rounded-xl bg-white px-3 py-2 text-xs font-semibold text-black transition hover:bg-white/85"
+              >
+                Xem gói
+              </Link>
+            </div>
+          </div>
+        )}
 
         {errorText && (
           <div className="mx-auto mt-4 max-w-3xl px-4">
-            <div className="rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-              {errorText}
+            <div className="flex items-start justify-between gap-3 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+              <span className="min-w-0">{errorText}</span>
+
+              <button
+                type="button"
+                onClick={() => setErrorText("")}
+                className="shrink-0 text-red-200/60 transition hover:text-red-100"
+                aria-label="Đóng thông báo lỗi"
+              >
+                ×
+              </button>
             </div>
           </div>
         )}
 
         {messages.length === 0 ? (
-          <div className="mx-auto flex min-h-[calc(100vh-64px)] max-w-3xl flex-col items-center justify-center px-4 pb-28">
-            <h1 className="text-center text-3xl font-semibold md:text-4xl">
-              Tôi có thể giúp gì cho bạn?
-            </h1>
+          <div className="mx-auto flex min-h-[calc(100dvh-150px)] max-w-3xl flex-col items-center justify-center px-4 pb-10 pt-8">
+            <div className="mb-5">
+  <Image
+    src="/aisitiki-logo.jpg"
+    alt="AI SITIKI"
+    width={72}
+    height={72}
+    className="mx-auto h-[72px] w-[72px] rounded-2xl object-contain"
+    priority
+  />
+</div>
 
-            <p className="mt-3 text-center text-sm text-white/45">
-              {activeProject
-                ? `Cuộc trò chuyện mới sẽ được lưu trong project "${activeProject.name}".`
-                : "Bạn có thể chat thử ngay. Đăng nhập để lưu lịch sử và quản lý project."}
-            </p>
+<h1 className="text-center text-3xl font-semibold tracking-tight md:text-4xl">
+  Bạn muốn hỏi gì?
+</h1>
+
+            <p className="mt-3 text-center text-sm text-white/40">
+  {selectedModel?.isFree
+    ? "Bản hiện tại dùng Gemini miễn phí. Nâng cấp để dùng OpenAI."
+    : "Bắt đầu cuộc trò chuyện với AI SITIKI."}
+</p>
+
 
             <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                sendMessage();
-              }}
-              className="mt-8 w-full"
-            >
-              <div className="rounded-[28px] bg-[#303030] p-3 shadow-xl">
-                <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onPaste={handlePaste}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      sendMessage();
-                    }
-                  }}
-                  rows={3}
-                  disabled={isLoading}
-                  placeholder="Nhắn tin cho AI Wrapper"
-                  className="min-h-24 w-full resize-none bg-transparent px-3 py-3 text-base text-white outline-none placeholder:text-white/45"
-                />
+  onSubmit={(event) => {
+    event.preventDefault();
+    void sendMessage();
+  }}
+  className="mt-8 w-full"
+>
+  {composer}
+</form>
 
-                {attachmentPreview}
-
-                <div className="flex items-center justify-between px-1 pb-1">
-                  <div className="flex items-center gap-2">
-                    <label className="cursor-pointer rounded-full bg-[#424242] px-3 py-1.5 text-xs text-white/70 hover:bg-[#4a4a4a]">
-                      + Ảnh
-                      <input
-                        type="file"
-                        accept="image/*"
-                        multiple
-                        className="hidden"
-                        onChange={handleFileChange}
-                      />
-                    </label>
-
-                    <span className="rounded-full bg-[#424242] px-3 py-1.5 text-xs text-white/70">
-                      {selectedModel?.displayName || "Gemini Flash"}
-                    </span>
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={
-                      isLoading || (!input.trim() && attachedFiles.length === 0)
-                    }
-                    className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-lg text-black hover:bg-white/90 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    ↑
-                  </button>
-                </div>
-              </div>
-            </form>
+            <p className="mt-3 text-center text-xs text-white/25">
+              AI có thể trả lời sai. Hãy kiểm tra thông tin quan trọng.
+            </p>
           </div>
         ) : (
           <>
-            <div className="mx-auto max-w-3xl px-4 pb-40 pt-8">
+            <div className="mx-auto max-w-3xl px-4 pb-44 pt-8">
               <div className="space-y-8">
-                {messages.map((message) =>
-                  message.role === "USER" ? (
-                    <div key={message.id} className="flex justify-end">
-                      <div className="max-w-[80%] rounded-3xl bg-[#303030] px-5 py-3 text-[15px] leading-7">
-                        {message.attachments &&
-                          message.attachments.length > 0 && (
-                            <div className="mb-3 flex flex-wrap gap-2">
-                              {message.attachments.map((file) => (
-                                <img
-                                  key={file.id}
-                                  src={file.dataUrl}
-                                  alt={file.name}
-                                  className="max-h-60 rounded-2xl border border-white/10 object-contain"
-                                />
-                              ))}
+                {messages.map((message) => {
+                  if (message.role === "SYSTEM") {
+                    return (
+                      <div
+                        key={message.id}
+                        className="text-center text-xs text-white/30"
+                      >
+                        {message.content}
+                      </div>
+                    );
+                  }
+
+                  if (message.role === "USER") {
+                    return (
+                      <div key={message.id} className="flex justify-end">
+                        <div className="max-w-[88%] rounded-3xl bg-[#303030] px-5 py-3 text-[15px] leading-7 sm:max-w-[80%]">
+                          {message.attachments &&
+                            message.attachments.length > 0 && (
+                              <div className="mb-3 flex flex-wrap gap-2">
+                                {message.attachments.map((file) => (
+                                  <img
+                                    key={file.id}
+                                    src={file.dataUrl}
+                                    alt={file.name}
+                                    className="max-h-64 max-w-full rounded-2xl border border-white/10 object-contain"
+                                  />
+                                ))}
+                              </div>
+                            )}
+
+                          {message.content && (
+                            <div className="whitespace-pre-wrap break-words">
+                              {message.content}
                             </div>
                           )}
-
-                        {message.content && (
-                          <div className="whitespace-pre-wrap">
-                            {message.content}
-                          </div>
-                        )}
+                        </div>
                       </div>
-                    </div>
-                  ) : (
-                    <div key={message.id} className="flex gap-4">
+                    );
+                  }
+
+                  return (
+                    <div key={message.id} className="flex gap-3 sm:gap-4">
                       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white text-xs font-black text-black">
                         AI
                       </div>
 
                       <div className="min-w-0 flex-1">
-                        <div className="mb-2 flex items-center justify-between">
-                          <p className="text-sm font-medium">AI Wrapper</p>
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <p className="text-sm font-medium">
+                            AI SITIKI
+                          </p>
 
                           <button
+                            type="button"
                             onClick={() =>
-                              navigator.clipboard.writeText(message.content)
+                              void copyMessage(
+                                message.id,
+                                message.content
+                              )
                             }
-                            className="rounded-lg px-2 py-1 text-xs text-white/40 hover:bg-white/10 hover:text-white"
+                            className="rounded-lg px-2 py-1 text-xs text-white/35 transition hover:bg-white/10 hover:text-white"
                           >
-                            Copy
+                            {copiedMessageId === message.id
+                              ? "Đã chép"
+                              : "Sao chép"}
                           </button>
                         </div>
 
-                        <div className="whitespace-pre-wrap text-[15px] leading-8 text-white/85">
+                        <div className="whitespace-pre-wrap break-words text-[15px] leading-8 text-white/85">
                           {message.content}
                         </div>
                       </div>
                     </div>
-                  )
-                )}
+                  );
+                })}
 
                 {isLoading && (
-                  <div className="flex gap-4">
+                  <div className="flex gap-3 sm:gap-4">
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white text-xs font-black text-black">
                       AI
                     </div>
@@ -1049,69 +1429,21 @@ export default function ChatPage() {
             </div>
 
             <div
-              className={`fixed bottom-0 right-0 z-40 bg-[#212121] px-4 pb-5 pt-3 transition-all duration-300 ${
-                sidebarOpen ? "left-[280px]" : "left-0"
+              className={`fixed bottom-0 right-0 z-30 bg-[#212121]/95 px-3 pb-4 pt-3 backdrop-blur transition-[left] duration-300 sm:px-4 ${
+                sidebarOpen ? "left-0 md:left-[280px]" : "left-0"
               }`}
             >
               <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  sendMessage();
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void sendMessage();
                 }}
                 className="mx-auto max-w-3xl"
               >
-                <div className="rounded-[28px] bg-[#303030] p-2 shadow-xl">
-                  <textarea
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onPaste={handlePaste}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        sendMessage();
-                      }
-                    }}
-                    rows={1}
-                    disabled={isLoading}
-                    placeholder="Nhắn tin cho AI Wrapper"
-                    className="max-h-36 min-h-11 w-full resize-none bg-transparent px-4 py-3 text-[15px] outline-none placeholder:text-white/45"
-                  />
-
-                  {attachmentPreview}
-
-                  <div className="flex items-center justify-between px-2 pb-1">
-                    <div className="flex items-center gap-2">
-                      <label className="cursor-pointer rounded-full bg-[#424242] px-3 py-1.5 text-xs text-white/70 hover:bg-[#4a4a4a]">
-                        + Ảnh
-                        <input
-                          type="file"
-                          accept="image/*"
-                          multiple
-                          className="hidden"
-                          onChange={handleFileChange}
-                        />
-                      </label>
-
-                      <span className="text-xs text-white/35">
-                        {selectedModel?.displayName || "Gemini Flash"}
-                      </span>
-                    </div>
-
-                    <button
-                      type="submit"
-                      disabled={
-                        isLoading ||
-                        (!input.trim() && attachedFiles.length === 0)
-                      }
-                      className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-lg text-black hover:bg-white/90 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      ↑
-                    </button>
-                  </div>
-                </div>
+                {composer}
 
                 <p className="mt-2 text-center text-xs text-white/25">
-                  AI có thể trả lời sai. Hãy kiểm tra lại thông tin quan trọng.
+                  AI có thể trả lời sai. Hãy kiểm tra thông tin quan trọng.
                 </p>
               </form>
             </div>

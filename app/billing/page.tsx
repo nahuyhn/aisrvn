@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
+import { createOrder } from "@/app/actions/order-actions";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getActiveSubscription } from "@/lib/subscription";
@@ -31,10 +32,16 @@ function getStatusText(status: string) {
   switch (status) {
     case "PAID":
       return "Đã thanh toán";
+
     case "PENDING":
       return "Chờ thanh toán";
+
     case "CANCELLED":
       return "Đã hủy";
+
+    case "EXPIRED":
+      return "Đã hết hạn";
+
     default:
       return status;
   }
@@ -44,10 +51,14 @@ function getStatusClass(status: string) {
   switch (status) {
     case "PAID":
       return "bg-green-500/20 text-green-300";
+
     case "PENDING":
       return "bg-yellow-500/20 text-yellow-300";
+
     case "CANCELLED":
+    case "EXPIRED":
       return "bg-red-500/20 text-red-300";
+
     default:
       return "bg-white/10 text-white/70";
   }
@@ -91,6 +102,15 @@ export default async function BillingPage({
 
   const activeSubscription = await getActiveSubscription(user.id);
 
+  const plans = await prisma.plan.findMany({
+    where: {
+      isActive: true,
+    },
+    orderBy: {
+      durationDays: "asc",
+    },
+  });
+
   const orders = await prisma.order.findMany({
     where: {
       userId: user.id,
@@ -100,7 +120,6 @@ export default async function BillingPage({
       amount: true,
       status: true,
       paymentCode: true,
-      paymentProvider: true,
       createdAt: true,
       paidAt: true,
       plan: {
@@ -140,23 +159,25 @@ export default async function BillingPage({
   return (
     <main className="min-h-screen bg-black px-4 py-10 text-white sm:px-6">
       <div className="mx-auto max-w-5xl">
+        {/* Tiêu đề */}
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-3xl font-bold">Thanh toán</h1>
 
-            <p className="mt-2 text-white/60">
-              Quản lý gói hiện tại và lịch sử thanh toán PayOS.
+            <p className="mt-2 text-sm text-white/55">
+              Quản lý gói và thanh toán qua PayOS.
             </p>
           </div>
 
           <Link
-            href="/pricing"
-            className="w-fit rounded-xl bg-white px-5 py-3 text-sm font-semibold text-black transition hover:bg-white/80"
+            href="#plans"
+            className="w-fit rounded-xl bg-white px-5 py-3 text-sm font-semibold text-black transition hover:bg-white/85"
           >
             Mua thêm gói
           </Link>
         </div>
 
+        {/* Thông báo thanh toán thành công */}
         {paymentSucceeded && (
           <div className="mt-8 rounded-2xl border border-green-500/30 bg-green-500/10 p-5">
             <p className="font-semibold text-green-300">
@@ -169,6 +190,7 @@ export default async function BillingPage({
           </div>
         )}
 
+        {/* Webhook chưa xử lý xong */}
         {paymentProcessing && (
           <div className="mt-8 rounded-2xl border border-yellow-500/30 bg-yellow-500/10 p-5">
             <p className="font-semibold text-yellow-300">
@@ -176,12 +198,12 @@ export default async function BillingPage({
             </p>
 
             <p className="mt-1 text-sm text-yellow-100/70">
-              PayOS đã chuyển bạn về website. Hãy tải lại trang sau vài giây
-              nếu gói chưa xuất hiện.
+              Hệ thống đang kích hoạt gói. Hãy tải lại trang sau vài giây.
             </p>
           </div>
         )}
 
+        {/* Người dùng hủy thanh toán */}
         {paymentCancelled && (
           <div className="mt-8 rounded-2xl border border-red-500/30 bg-red-500/10 p-5">
             <p className="font-semibold text-red-300">
@@ -194,34 +216,39 @@ export default async function BillingPage({
           </div>
         )}
 
-        <section className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-6">
+        {/* Gói hiện tại */}
+        <section className="mt-8 rounded-2xl border border-white/10 bg-white/[0.04] p-6">
           <h2 className="text-xl font-semibold">Gói hiện tại</h2>
 
           {activeSubscription ? (
-            <div className="mt-4 grid gap-4 text-sm text-white/70 sm:grid-cols-2">
+            <div className="mt-5 grid gap-5 text-sm sm:grid-cols-2">
               <div>
-                <p className="text-white/50">Tên gói</p>
+                <p className="text-white/45">Tên gói</p>
+
                 <p className="mt-1 font-medium text-white">
                   {activeSubscription.plan.name}
                 </p>
               </div>
 
               <div>
-                <p className="text-white/50">Giới hạn mỗi ngày</p>
+                <p className="text-white/45">Giới hạn mỗi ngày</p>
+
                 <p className="mt-1 font-medium text-white">
                   {activeSubscription.plan.messageLimitPerDay} tin nhắn
                 </p>
               </div>
 
               <div>
-                <p className="text-white/50">Ngày bắt đầu</p>
+                <p className="text-white/45">Ngày bắt đầu</p>
+
                 <p className="mt-1 text-white">
                   {formatDate(activeSubscription.startAt)}
                 </p>
               </div>
 
               <div>
-                <p className="text-white/50">Ngày hết hạn</p>
+                <p className="text-white/45">Ngày hết hạn</p>
+
                 <p className="mt-1 text-white">
                   {formatDate(activeSubscription.endAt)}
                 </p>
@@ -234,16 +261,97 @@ export default async function BillingPage({
               </p>
 
               <Link
-                href="/pricing"
+                href="#plans"
                 className="mt-4 inline-block text-sm font-medium text-white underline underline-offset-4"
               >
-                Xem bảng giá
+                Chọn gói
               </Link>
             </div>
           )}
         </section>
 
-        <section className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-6">
+        {/* Danh sách gói */}
+        <section
+          id="plans"
+          className="mt-8 scroll-mt-24 rounded-2xl border border-white/10 bg-white/[0.04] p-6"
+        >
+          <div>
+            <h2 className="text-xl font-semibold">Chọn gói</h2>
+
+            <p className="mt-2 text-sm text-white/50">
+              Thanh toán và kích hoạt tự động qua PayOS.
+            </p>
+          </div>
+
+          {plans.length === 0 ? (
+            <p className="mt-5 text-sm text-white/50">
+              Hiện chưa có gói nào đang mở bán.
+            </p>
+          ) : (
+            <div className="mt-6 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {plans.map((plan) => (
+                <article
+                  key={plan.id}
+                  className="flex flex-col rounded-2xl border border-white/10 bg-black p-5"
+                >
+                  <div className="flex-1">
+                    <h3 className="text-lg font-semibold">{plan.name}</h3>
+
+                    <p className="mt-3 text-3xl font-bold">
+                      {formatPrice(plan.price)}
+                    </p>
+
+                    <div className="mt-4 space-y-2 text-sm text-white/55">
+                      <p>{plan.durationDays} ngày sử dụng</p>
+
+                      <p>{plan.messageLimitPerDay} tin nhắn mỗi ngày</p>
+                    </div>
+                  </div>
+
+                  <form
+                    action={async (formData: FormData) => {
+                      "use server";
+
+                      await createOrder(plan.id, formData);
+                    }}
+                    className="mt-6"
+                  >
+                    <label className="flex cursor-pointer items-start gap-3 text-xs leading-5 text-white/55">
+                      <input
+                        type="checkbox"
+                        name="termsAccepted"
+                        required
+                        className="mt-1 h-4 w-4 shrink-0 accent-white"
+                      />
+
+                      <span>
+                        Tôi đồng ý{" "}
+                        <Link
+                          href="/terms"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-white underline underline-offset-4"
+                        >
+                          Điều khoản dịch vụ
+                        </Link>
+                      </span>
+                    </label>
+
+                    <button
+                      type="submit"
+                      className="mt-4 w-full rounded-xl bg-white px-4 py-3 text-sm font-semibold text-black transition hover:bg-white/85"
+                    >
+                      Thanh toán PayOS
+                    </button>
+                  </form>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* Lịch sử đơn hàng */}
+        <section className="mt-8 rounded-2xl border border-white/10 bg-white/[0.04] p-6">
           <h2 className="text-xl font-semibold">Lịch sử đơn hàng</h2>
 
           {orders.length === 0 ? (
@@ -252,7 +360,7 @@ export default async function BillingPage({
             </p>
           ) : (
             <div className="mt-6 overflow-x-auto rounded-xl border border-white/10">
-              <table className="min-w-[850px] w-full text-left text-sm">
+              <table className="w-full min-w-[850px] text-left text-sm">
                 <thead className="bg-white/10 text-white/70">
                   <tr>
                     <th className="p-4">Mã đơn</th>
@@ -266,14 +374,19 @@ export default async function BillingPage({
 
                 <tbody>
                   {orders.map((order) => (
-                    <tr key={order.id} className="border-t border-white/10">
+                    <tr
+                      key={order.id}
+                      className="border-t border-white/10"
+                    >
                       <td className="p-4 font-mono text-xs text-white/70">
                         {order.paymentCode ?? "—"}
                       </td>
 
                       <td className="p-4">{order.plan.name}</td>
 
-                      <td className="p-4">{formatPrice(order.amount)}</td>
+                      <td className="p-4">
+                        {formatPrice(order.amount)}
+                      </td>
 
                       <td className="p-4">
                         <span
@@ -285,11 +398,11 @@ export default async function BillingPage({
                         </span>
                       </td>
 
-                      <td className="p-4 whitespace-nowrap">
+                      <td className="whitespace-nowrap p-4">
                         {formatDate(order.createdAt)}
                       </td>
 
-                      <td className="p-4 whitespace-nowrap">
+                      <td className="whitespace-nowrap p-4">
                         {formatDate(order.paidAt)}
                       </td>
                     </tr>
