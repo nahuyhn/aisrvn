@@ -5,6 +5,13 @@ import { prisma } from "@/lib/prisma";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+export async function GET() {
+  return NextResponse.json({
+    success: true,
+    message: "PayOS webhook is running",
+  });
+}
+
 export async function POST(request: Request) {
   try {
     const payload = await request.json();
