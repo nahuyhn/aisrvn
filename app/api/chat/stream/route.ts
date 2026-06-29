@@ -1,4 +1,4 @@
-import { generateText } from "ai";
+import { streamText } from "ai";
 import { google } from "@ai-sdk/google";
 import { openai } from "@ai-sdk/openai";
 import { getServerSession } from "next-auth";
@@ -20,7 +20,9 @@ type AiMessage = {
 type ChatAttachment = {
   name: string;
   type: string;
-  dataUrl: string;
+  kind: "image" | "file";
+  dataUrl?: string;
+  textContent?: string;
 };
 
 type SelectedModel = {
@@ -46,8 +48,11 @@ const GUEST_DAILY_LIMIT_PER_IP = 3;
 const FREE_USER_DAILY_LIMIT = 20;
 const GUEST_MAX_MESSAGE_LENGTH = 800;
 const USER_MAX_MESSAGE_LENGTH = 4000;
-const MAX_ATTACHMENTS = 2;
-const MAX_DATA_URL_LENGTH = 2_000_000;
+
+const MAX_IMAGE_ATTACHMENTS = 2;
+const MAX_FILE_ATTACHMENTS = 1;
+const MAX_IMAGE_DATA_URL_LENGTH = 4_000_000;
+const MAX_FILE_TEXT_CHARS = 12_000;
 
 const SYSTEM_PROMPT = `
 Bạn là AI SITIKI, trợ lý AI tiếng Việt.
@@ -59,21 +64,9 @@ Không tự nhắc lại toàn bộ câu hỏi của người dùng.
 Không viết mở bài/kết bài dài nếu không cần.
 `.trim();
 
-const SUMMARY_SYSTEM_PROMPT = `
-Bạn là bộ phận tóm tắt nội bộ của AI SITIKI.
-Nhiệm vụ: cập nhật bản tóm tắt ngắn của cuộc trò chuyện.
-Chỉ giữ thông tin quan trọng: mục tiêu, yêu cầu, quyết định đã chốt, dữ liệu người dùng đưa, lỗi đang xử lý, bước tiếp theo.
-Không thêm suy đoán.
-Không viết dài.
-Tối đa khoảng 1200 ký tự.
-`.trim();
-
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_MESSAGE_CHARS = 1200;
-const SUMMARY_TRIGGER_MESSAGE_COUNT = 16;
-const SUMMARY_UPDATE_EVERY_MESSAGES = 12;
 const MAX_SUMMARY_CHARS = 1800;
-const MAX_SUMMARY_SOURCE_MESSAGE_CHARS = 800;
 
 const guestUsageMap = new Map<string, { count: number; resetAt: number }>();
 
@@ -190,8 +183,10 @@ function createTitle(message: string) {
   if (!clean) return "Cuộc trò chuyện mới";
 
   const separators = [".", "?", "!", "\n"];
+
   for (const sep of separators) {
     const index = clean.indexOf(sep);
+
     if (index > 8) {
       clean = clean.slice(0, index);
       break;
@@ -215,17 +210,6 @@ function getAiModel(selectedModel: SelectedModel) {
   }
 
   throw new Error(`Provider AI chưa được hỗ trợ: ${selectedModel.provider}`);
-}
-
-function toPublicModel(selectedModel: SelectedModel) {
-  return {
-    id: selectedModel.id,
-    displayName: selectedModel.displayName,
-    category: selectedModel.category,
-    isFree: selectedModel.isFree,
-    supportsImage: selectedModel.supportsImage,
-    supportsFile: selectedModel.supportsFile,
-  };
 }
 
 function getTodayStart() {
@@ -391,112 +375,153 @@ async function getSelectedModel(modelId: string | null) {
   return selectedModel;
 }
 
-async function maybeUpdateChatSummary(params: {
-  sessionId: string;
-  currentSummary: string | null;
-  summaryMessageCount: number;
+function parseAttachments(bodyAttachments: unknown) {
+  const attachments: ChatAttachment[] = Array.isArray(bodyAttachments)
+    ? bodyAttachments
+        .filter(
+          (file: ChatAttachment) =>
+            typeof file.name === "string" &&
+            typeof file.type === "string" &&
+            (file.kind === "image" || file.kind === "file"),
+        )
+        .slice(0, MAX_IMAGE_ATTACHMENTS + MAX_FILE_ATTACHMENTS)
+    : [];
+
+  const imageAttachments = attachments
+    .filter(
+      (file) =>
+        file.kind === "image" &&
+        typeof file.dataUrl === "string" &&
+        file.type.startsWith("image/"),
+    )
+    .slice(0, MAX_IMAGE_ATTACHMENTS);
+
+  const fileAttachments = attachments
+    .filter(
+      (file) => file.kind === "file" && typeof file.textContent === "string",
+    )
+    .slice(0, MAX_FILE_ATTACHMENTS);
+
+  return {
+    imageAttachments,
+    fileAttachments,
+  };
+}
+
+function buildUserContent(params: {
+  cleanMessage: string;
+  imageAttachments: ChatAttachment[];
+  fileAttachments: ChatAttachment[];
+}) {
+  const { cleanMessage, imageAttachments, fileAttachments } = params;
+
+  const fileContext =
+    fileAttachments.length > 0
+      ? fileAttachments
+          .map((file, index) => {
+            const text = truncateText(
+              (file.textContent || "").trim(),
+              MAX_FILE_TEXT_CHARS,
+            );
+
+            return `TÀI LIỆU ĐÍNH KÈM ${index + 1}
+Tên file: ${file.name}
+
+NỘI DUNG ĐÃ TRÍCH XUẤT:
+${text}`;
+          })
+          .join("\n\n====================\n\n")
+      : "";
+
+  const basePrompt =
+    cleanMessage ||
+    (imageAttachments.length > 0
+      ? "Hãy phân tích ảnh được gửi kèm."
+      : "Hãy đọc và xử lý tài liệu được gửi kèm.");
+
+  const textPrompt = fileContext
+    ? `${basePrompt}
+
+Lưu ý quan trọng:
+Người dùng đã gửi file. Nội dung file đã được hệ thống trích xuất bên dưới.
+Bạn phải đọc phần NỘI DUNG ĐÃ TRÍCH XUẤT để trả lời.
+Không được nói rằng bạn không thể truy cập file.
+
+${fileContext}`
+    : imageAttachments.length > 0
+      ? `${basePrompt}
+
+Lưu ý quan trọng:
+Người dùng đã gửi ảnh trực tiếp trong request này.
+Bạn phải phân tích ảnh được gửi kèm.
+Không được nói rằng bạn không thể xem ảnh.`
+      : basePrompt;
+
+  if (imageAttachments.length === 0) {
+    return textPrompt;
+  }
+
+  return [
+    {
+      type: "text" as const,
+      text: textPrompt,
+    },
+    ...imageAttachments.map((file) => ({
+      type: "image" as const,
+      image: file.dataUrl!,
+      mediaType: file.type || "image/jpeg",
+    })),
+  ];
+}
+
+function validateAttachments(params: {
+  imageAttachments: ChatAttachment[];
+  fileAttachments: ChatAttachment[];
   selectedModel: SelectedModel;
 }) {
-  const { sessionId, currentSummary, summaryMessageCount, selectedModel } =
-    params;
+  const { imageAttachments, fileAttachments, selectedModel } = params;
 
-  const totalMessages = await prisma.chatMessage.count({
-    where: {
-      sessionId,
-    },
-  });
-
-  if (totalMessages < SUMMARY_TRIGGER_MESSAGE_COUNT) {
-    return;
+  for (const file of imageAttachments) {
+    if ((file.dataUrl || "").length > MAX_IMAGE_DATA_URL_LENGTH) {
+      return Response.json(
+        {
+          error: "Ảnh quá lớn. Vui lòng gửi ảnh nhẹ hơn để giảm chi phí xử lý.",
+        },
+        { status: 400 },
+      );
+    }
   }
 
-  if (totalMessages - summaryMessageCount < SUMMARY_UPDATE_EVERY_MESSAGES) {
-    return;
+  for (const file of fileAttachments) {
+    if ((file.textContent || "").length > MAX_FILE_TEXT_CHARS) {
+      return Response.json(
+        {
+          error: "Nội dung file quá dài. Vui lòng rút gọn file.",
+        },
+        { status: 400 },
+      );
+    }
   }
 
-  const messagesCoveredByNewSummary = Math.max(
-    0,
-    totalMessages - MAX_HISTORY_MESSAGES,
-  );
-
-  if (messagesCoveredByNewSummary <= summaryMessageCount) {
-    return;
-  }
-
-  const newMessagesToSummarizeCount =
-    messagesCoveredByNewSummary - summaryMessageCount;
-
-  if (newMessagesToSummarizeCount <= 0) {
-    return;
-  }
-
-  const messagesToSummarize = await prisma.chatMessage.findMany({
-    where: {
-      sessionId,
-    },
-    select: {
-      role: true,
-      content: true,
-    },
-    orderBy: {
-      createdAt: "asc",
-    },
-    skip: summaryMessageCount,
-    take: newMessagesToSummarizeCount,
-  });
-
-  if (messagesToSummarize.length === 0) {
-    return;
-  }
-
-  const sourceText = messagesToSummarize
-    .map((item) => {
-      const role =
-        item.role === "USER"
-          ? "Người dùng"
-          : item.role === "ASSISTANT"
-            ? "AI"
-            : "Hệ thống";
-
-      return `${role}: ${truncateText(
-        item.content,
-        MAX_SUMMARY_SOURCE_MESSAGE_CHARS,
-      )}`;
-    })
-    .join("\n\n");
-
-  const result = await generateText({
-    model: getAiModel(selectedModel),
-    maxOutputTokens: 500,
-    messages: [
+  if (imageAttachments.length > 0 && !selectedModel.supportsImage) {
+    return Response.json(
       {
-        role: "system",
-        content: SUMMARY_SYSTEM_PROMPT,
+        error: `AI ${selectedModel.displayName} hiện chưa hỗ trợ hình ảnh.`,
       },
+      { status: 400 },
+    );
+  }
+
+  if (fileAttachments.length > 0 && !selectedModel.supportsFile) {
+    return Response.json(
       {
-        role: "user",
-        content: `
-Tóm tắt cũ:
-${currentSummary?.trim() || "(chưa có)"}
-
-Tin nhắn mới cần nhập vào tóm tắt:
-${sourceText}
-
-Hãy tạo bản tóm tắt mới ngắn gọn, đủ ngữ cảnh để AI tiếp tục hỗ trợ người dùng ở các câu sau.
-`.trim(),
+        error: `AI ${selectedModel.displayName} hiện chưa hỗ trợ tệp đính kèm.`,
       },
-    ],
-  });
+      { status: 400 },
+    );
+  }
 
-  await prisma.chatSession.update({
-    where: {
-      id: sessionId,
-    },
-    data: {
-      summary: truncateText(result.text.trim(), MAX_SUMMARY_CHARS),
-      summaryMessageCount: messagesCoveredByNewSummary,
-    },
-  });
+  return null;
 }
 
 export async function POST(req: Request) {
@@ -512,18 +537,6 @@ export async function POST(req: Request) {
     const modelId = typeof body.modelId === "string" ? body.modelId : null;
 
     const message = body.message;
-
-    const attachments: ChatAttachment[] = Array.isArray(body.attachments)
-      ? body.attachments
-          .filter(
-            (file: ChatAttachment) =>
-              typeof file.name === "string" &&
-              typeof file.type === "string" &&
-              typeof file.dataUrl === "string" &&
-              file.type.startsWith("image/"),
-          )
-          .slice(0, MAX_ATTACHMENTS)
-      : [];
 
     if (!message || typeof message !== "string") {
       return Response.json(
@@ -541,42 +554,37 @@ export async function POST(req: Request) {
       );
     }
 
-    for (const file of attachments) {
-      if (file.dataUrl.length > MAX_DATA_URL_LENGTH) {
-        return Response.json(
-          {
-            error:
-              "Ảnh quá lớn. Vui lòng gửi ảnh nhẹ hơn để giảm chi phí xử lý.",
-          },
-          { status: 400 },
-        );
-      }
-    }
-
     const selectedModel = await getSelectedModel(modelId);
 
-    if (attachments.length > 0 && !selectedModel.supportsImage) {
-      return Response.json(
-        {
-          error: `AI ${selectedModel.displayName} hiện chưa hỗ trợ hình ảnh.`,
-        },
-        { status: 400 },
-      );
+    const { imageAttachments, fileAttachments } = parseAttachments(
+      body.attachments,
+    );
+
+    console.log("ATTACHMENT_DEBUG:", {
+  rawAttachments: Array.isArray(body.attachments)
+    ? body.attachments.length
+    : 0,
+  imageCount: imageAttachments.length,
+  fileCount: fileAttachments.length,
+  firstImageLength: imageAttachments[0]?.dataUrl?.length || 0,
+  firstFileChars: fileAttachments[0]?.textContent?.length || 0,
+});
+
+    const attachmentError = validateAttachments({
+      imageAttachments,
+      fileAttachments,
+      selectedModel,
+    });
+
+    if (attachmentError) {
+      return attachmentError;
     }
 
-    const userContent =
-      attachments.length > 0
-        ? [
-            {
-              type: "text" as const,
-              text: cleanMessage,
-            },
-            ...attachments.map((file) => ({
-              type: "image" as const,
-              image: file.dataUrl,
-            })),
-          ]
-        : cleanMessage;
+    const userContent = buildUserContent({
+      cleanMessage,
+      imageAttachments,
+      fileAttachments,
+    });
 
     const user = await getCurrentUser();
 
@@ -597,11 +605,11 @@ export async function POST(req: Request) {
         );
       }
 
-      if (attachments.length > 0) {
+      if (imageAttachments.length > 0 || fileAttachments.length > 0) {
         return Response.json(
           {
             error:
-              "Khách dùng thử chưa được gửi ảnh. Vui lòng đăng nhập hoặc nâng cấp gói.",
+              "Khách dùng thử chưa được gửi ảnh hoặc file. Vui lòng đăng nhập để sử dụng.",
           },
           { status: 403 },
         );
@@ -619,29 +627,74 @@ export async function POST(req: Request) {
         );
       }
 
-      const result = await generateText({
-        model: getAiModel(selectedModel),
-        maxOutputTokens: getOutputBudget(cleanMessage, false),
-        messages: [
-          {
-            role: "system",
-            content: SYSTEM_PROMPT,
-          },
-          {
-            role: "user",
-            content: cleanMessage,
-          },
-        ],
-      });
+      const messagesForAi =
+  imageAttachments.length > 0
+    ? [
+        {
+          role: "system" as const,
+          content: SYSTEM_PROMPT,
+        },
+        {
+          role: "user" as const,
+          content: userContent as any,
+        },
+      ]
+    : [
+        ...aiMessages,
+        {
+          role: "user" as const,
+          content: userContent as string,
+        },
+      ];
 
-      return Response.json({
-        sessionId: null,
-        chatSession: null,
-        answer: result.text,
-        isGuest: true,
-        remainingGuestMessages: guestLimit.remaining,
-        model: toPublicModel(selectedModel),
-      });
+console.log("AI_INPUT_DEBUG:", {
+  cleanMessage,
+  imageCount: imageAttachments.length,
+  fileCount: fileAttachments.length,
+  firstImageType: imageAttachments[0]?.type || "",
+  firstImageLength: imageAttachments[0]?.dataUrl?.length || 0,
+  firstFileName: fileAttachments[0]?.name || "",
+  firstFileChars: fileAttachments[0]?.textContent?.length || 0,
+  userContentPreview:
+    typeof userContent === "string"
+      ? userContent.slice(0, 500)
+      : JSON.stringify(userContent).slice(0, 500),
+});
+
+const result = streamText({
+  model: getAiModel(selectedModel),
+  maxOutputTokens: getOutputBudget(
+    cleanMessage,
+    selectedModel.isFree === false,
+  ),
+  messages: messagesForAi,
+});
+
+      const encoder = new TextEncoder();
+
+      return new Response(
+        new ReadableStream({
+          async start(controller) {
+            try {
+              for await (const textDelta of result.textStream) {
+                controller.enqueue(encoder.encode(textDelta));
+              }
+
+              controller.close();
+            } catch (error) {
+              console.error("GUEST_STREAM_ERROR:", error);
+              controller.error(error);
+            }
+          },
+        }),
+        {
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            "x-is-guest": "true",
+          },
+        },
+      );
     }
 
     if (cleanMessage.length > USER_MAX_MESSAGE_LENGTH) {
@@ -745,14 +798,14 @@ export async function POST(req: Request) {
 
     const aiMessages = optimizeHistoryForAi(history, chatSession.summary);
 
-    const result = await generateText({
+    const result = streamText({
       model: getAiModel(selectedModel),
       maxOutputTokens: getOutputBudget(
         cleanMessage,
         selectedModel.isFree === false,
       ),
       messages:
-        attachments.length > 0
+        imageAttachments.length > 0
           ? [
               {
                 role: "system",
@@ -763,71 +816,84 @@ export async function POST(req: Request) {
                 content: userContent as any,
               },
             ]
-          : aiMessages,
+          : fileAttachments.length > 0
+            ? [
+                ...aiMessages,
+                {
+                  role: "user",
+                  content: userContent as string,
+                },
+              ]
+            : aiMessages,
     });
 
-    const assistantMessage = await prisma.chatMessage.create({
-      data: {
-        sessionId: chatSession.id,
-        role: "ASSISTANT",
-        content: result.text,
-      },
-    });
+    const encoder = new TextEncoder();
+    const currentSessionId = chatSession.id;
+    const currentSessionTitle = chatSession.title;
+    const currentProjectId = chatSession.projectId || "";
 
-    const updatedChatSession = await prisma.chatSession.update({
-      where: {
-        id: chatSession.id,
-      },
-      data: {
-        updatedAt: new Date(),
-        title:
-          chatSession.title === "Cuộc trò chuyện mới"
-            ? createTitle(cleanMessage)
-            : chatSession.title,
-      },
-      select: {
-        id: true,
-        title: true,
-        projectId: true,
-        updatedAt: true,
-      },
-    });
+    return new Response(
+      new ReadableStream({
+        async start(controller) {
+          let fullText = "";
 
-    await prisma.usageLog.create({
-      data: {
-        userId: user.id,
-        provider: selectedModel.provider,
-        model: selectedModel.model,
-        inputTextLength: result.usage?.inputTokens ?? cleanMessage.length,
-        outputTextLength: result.usage?.outputTokens ?? result.text.length,
-      },
-    });
+          try {
+            for await (const textDelta of result.textStream) {
+              fullText += textDelta;
+              controller.enqueue(encoder.encode(textDelta));
+            }
 
-    await maybeUpdateChatSummary({
-      sessionId: chatSession.id,
-      currentSummary: chatSession.summary,
-      summaryMessageCount: chatSession.summaryMessageCount,
-      selectedModel,
-    });
+            await prisma.chatMessage.create({
+              data: {
+                sessionId: currentSessionId,
+                role: "ASSISTANT",
+                content: fullText,
+              },
+            });
 
-    return Response.json({
-      sessionId: updatedChatSession.id,
-      chatSession: updatedChatSession,
-      answer: assistantMessage.content,
-      isGuest: false,
-      usage: {
-        usedToday: dailyLimit.usedToday + 1,
-        limit: dailyLimit.limit,
-        remaining: Math.max(0, dailyLimit.remaining - 1),
+            await prisma.chatSession.update({
+              where: {
+                id: currentSessionId,
+              },
+              data: {
+                updatedAt: new Date(),
+              },
+            });
+
+            await prisma.usageLog.create({
+              data: {
+                userId: user.id,
+                provider: selectedModel.provider,
+                model: selectedModel.model,
+                inputTextLength: cleanMessage.length,
+                outputTextLength: fullText.length,
+              },
+            });
+
+            controller.close();
+          } catch (error) {
+            console.error("USER_STREAM_ERROR:", error);
+            controller.error(error);
+          }
+        },
+      }),
+      {
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          "x-is-guest": "false",
+          "x-session-id": currentSessionId,
+          "x-session-title": encodeURIComponent(currentSessionTitle),
+          "x-project-id": currentProjectId,
+        },
       },
-      model: toPublicModel(selectedModel),
-    });
+    );
   } catch (error) {
-    console.error("CHAT_API_ERROR:", error);
+    console.error("CHAT_STREAM_API_ERROR:", error);
 
     return Response.json(
       {
-        error: error instanceof Error ? error.message : "Có lỗi khi gọi AI.",
+        error: error instanceof Error ? error.message : "Có lỗi khi stream AI.",
       },
       { status: 500 },
     );

@@ -1,21 +1,16 @@
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const session = await getServerSession(authOptions);
-
-    const models = await prisma.modelConfig.findMany({
+    const model = await prisma.modelConfig.findFirst({
       where: {
         isActive: true,
+        isFree: true,
       },
       select: {
         id: true,
-        provider: true,
-        model: true,
         displayName: true,
         description: true,
         category: true,
@@ -34,20 +29,16 @@ export async function GET() {
       ],
     });
 
-    /**
-     * Hiện tại:
-     * - Guest: chỉ thấy model free
-     * - User đăng nhập: tạm thời cũng chỉ thấy model free
-     *
-     * Sau này:
-     * - User mua gói model nào thì trả thêm model đó.
-     */
-    const visibleModels = session?.user?.email
-      ? models.filter((model) => model.isFree)
-      : models.filter((model) => model.isFree);
-
     return Response.json({
-      models: visibleModels,
+      models: model
+        ? [
+            {
+              ...model,
+              displayName: "AI SITIKI",
+              description: "Trợ lý AI của AI SITIKI.",
+            },
+          ]
+        : [],
     });
   } catch (error) {
     console.error("GET_MODELS_ERROR:", error);
@@ -57,7 +48,7 @@ export async function GET() {
         error:
           error instanceof Error
             ? error.message
-            : "Không tải được danh sách model.",
+            : "Không tải được AI.",
       },
       { status: 500 }
     );

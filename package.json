@@ -16,8 +16,10 @@
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "ai": "^6.0.197",
+    "mammoth": "^1.12.0",
     "next": "16.2.7",
     "next-auth": "^4.24.14",
+    "pdf-parse": "^2.4.5",
     "pg": "^8.21.0",
     "prisma": "^7.8.0",
     "react": "19.2.4",
@@ -26,6 +28,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pdf-parse": "^1.1.5",
     "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",

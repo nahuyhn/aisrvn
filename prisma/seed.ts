@@ -58,9 +58,53 @@ async function main() {
       },
     });
   }
+  // Seed model miễn phí mặc định cho AI SITIKI
+// Khách chỉ thấy displayName, không cần biết bên trong dùng Gemini
+await prisma.modelConfig.upsert({
+  where: {
+    id: "model-free-default",
+  },
+  update: {
+    provider: "google",
+    model: "gemini-2.5-flash",
+    displayName: "AI SITIKI",
+    description: "Trợ lý AI miễn phí của AI SITIKI.",
+    category: "FREE",
+    supportsImage: true,
+    supportsFile: true,
+    isFree: true,
+    isActive: true,
+    sortOrder: 1,
+  },
+  create: {
+    id: "model-free-default",
+    provider: "google",
+    model: "gemini-2.5-flash",
+    displayName: "AI SITIKI",
+    description: "Trợ lý AI miễn phí của AI SITIKI.",
+    category: "FREE",
+    supportsImage: true,
+    supportsFile: true,
+    isFree: true,
+    isActive: true,
+    sortOrder: 1,
+  },
+});
 
   console.log("Seed plans successfully!");
 }
+
+await prisma.modelConfig.updateMany({
+  where: {
+    id: {
+      not: "model-free-default",
+    },
+    isFree: true,
+  },
+  data: {
+    isActive: false,
+  },
+});
 
 main()
   .catch((error) => {

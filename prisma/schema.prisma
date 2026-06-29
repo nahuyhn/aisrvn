@@ -134,6 +134,8 @@ model ChatSession {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  summary             String?
+summaryMessageCount Int      @default(0)
 }
 
 model ChatMessage {

@@ -1,6 +1,7 @@
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+
 export const dynamic = "force-dynamic";
 
 async function getCurrentUser() {
@@ -41,7 +42,9 @@ export async function GET() {
       },
     });
 
-    return Response.json(projects);
+    return Response.json({
+      projects,
+    });
   } catch (error) {
     console.error("GET_PROJECTS_ERROR", error);
 
@@ -69,14 +72,21 @@ export async function POST(req: Request) {
 
     const body = await req.json();
 
+    const rawName =
+      typeof body.name === "string" ? body.name.trim() : "";
+
+    const projectName = rawName || "Project mới";
+
     const project = await prisma.project.create({
       data: {
-        name: body.name || "Project mới",
+        name: projectName,
         userId: user.id,
       },
     });
 
-    return Response.json(project);
+    return Response.json({
+      project,
+    });
   } catch (error) {
     console.error("CREATE_PROJECT_ERROR", error);
 
