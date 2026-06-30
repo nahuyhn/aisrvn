@@ -561,14 +561,14 @@ export async function POST(req: Request) {
     );
 
     console.log("ATTACHMENT_DEBUG:", {
-  rawAttachments: Array.isArray(body.attachments)
-    ? body.attachments.length
-    : 0,
-  imageCount: imageAttachments.length,
-  fileCount: fileAttachments.length,
-  firstImageLength: imageAttachments[0]?.dataUrl?.length || 0,
-  firstFileChars: fileAttachments[0]?.textContent?.length || 0,
-});
+      rawAttachments: Array.isArray(body.attachments)
+        ? body.attachments.length
+        : 0,
+      imageCount: imageAttachments.length,
+      fileCount: fileAttachments.length,
+      firstImageLength: imageAttachments[0]?.dataUrl?.length || 0,
+      firstFileChars: fileAttachments[0]?.textContent?.length || 0,
+    });
 
     const attachmentError = validateAttachments({
       imageAttachments,
@@ -627,48 +627,20 @@ export async function POST(req: Request) {
         );
       }
 
-      const messagesForAi =
-  imageAttachments.length > 0
-    ? [
-        {
-          role: "system" as const,
-          content: SYSTEM_PROMPT,
-        },
-        {
-          role: "user" as const,
-          content: userContent as any,
-        },
-      ]
-    : [
-        ...aiMessages,
-        {
-          role: "user" as const,
-          content: userContent as string,
-        },
-      ];
-
-console.log("AI_INPUT_DEBUG:", {
-  cleanMessage,
-  imageCount: imageAttachments.length,
-  fileCount: fileAttachments.length,
-  firstImageType: imageAttachments[0]?.type || "",
-  firstImageLength: imageAttachments[0]?.dataUrl?.length || 0,
-  firstFileName: fileAttachments[0]?.name || "",
-  firstFileChars: fileAttachments[0]?.textContent?.length || 0,
-  userContentPreview:
-    typeof userContent === "string"
-      ? userContent.slice(0, 500)
-      : JSON.stringify(userContent).slice(0, 500),
-});
-
-const result = streamText({
-  model: getAiModel(selectedModel),
-  maxOutputTokens: getOutputBudget(
-    cleanMessage,
-    selectedModel.isFree === false,
-  ),
-  messages: messagesForAi,
-});
+      const result = streamText({
+        model: getAiModel(selectedModel),
+        maxOutputTokens: getOutputBudget(cleanMessage, false),
+        messages: [
+          {
+            role: "system",
+            content: SYSTEM_PROMPT,
+          },
+          {
+            role: "user",
+            content: cleanMessage,
+          },
+        ],
+      });
 
       const encoder = new TextEncoder();
 
@@ -798,33 +770,47 @@ const result = streamText({
 
     const aiMessages = optimizeHistoryForAi(history, chatSession.summary);
 
+    const messagesForAi: any[] =
+      imageAttachments.length > 0
+        ? [
+            {
+              role: "system" as const,
+              content: SYSTEM_PROMPT,
+            },
+            {
+              role: "user" as const,
+              content: userContent,
+            },
+          ]
+        : [
+            ...aiMessages,
+            {
+              role: "user" as const,
+              content: userContent as string,
+            },
+          ];
+
+    console.log("AI_INPUT_DEBUG:", {
+      cleanMessage,
+      imageCount: imageAttachments.length,
+      fileCount: fileAttachments.length,
+      firstImageType: imageAttachments[0]?.type || "",
+      firstImageLength: imageAttachments[0]?.dataUrl?.length || 0,
+      firstFileName: fileAttachments[0]?.name || "",
+      firstFileChars: fileAttachments[0]?.textContent?.length || 0,
+      userContentPreview:
+        typeof userContent === "string"
+          ? userContent.slice(0, 500)
+          : JSON.stringify(userContent).slice(0, 500),
+    });
+
     const result = streamText({
       model: getAiModel(selectedModel),
       maxOutputTokens: getOutputBudget(
         cleanMessage,
         selectedModel.isFree === false,
       ),
-      messages:
-        imageAttachments.length > 0
-          ? [
-              {
-                role: "system",
-                content: SYSTEM_PROMPT,
-              },
-              {
-                role: "user",
-                content: userContent as any,
-              },
-            ]
-          : fileAttachments.length > 0
-            ? [
-                ...aiMessages,
-                {
-                  role: "user",
-                  content: userContent as string,
-                },
-              ]
-            : aiMessages,
+      messages: messagesForAi,
     });
 
     const encoder = new TextEncoder();
