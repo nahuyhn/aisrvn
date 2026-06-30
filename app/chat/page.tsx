@@ -81,7 +81,7 @@ type SendMessageResponse = ApiError & {
 };
 
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
-const MAX_IMAGE_COUNT = 4;
+const MAX_IMAGE_COUNT = 2;
 
 async function readJson<T>(response: Response, apiName: string): Promise<T> {
   const rawText = await response.text();
@@ -790,33 +790,46 @@ export default function ChatPage() {
     }
   }
 
-  function addImageFile(file: File) {
+  async function addImageFile(file: File) {
     if (file.size > MAX_IMAGE_SIZE) {
       setErrorText(`Ảnh "${file.name || "clipboard-image"}" vượt quá 10MB.`);
       return;
     }
 
-    const reader = new FileReader();
+    const currentImageCount = attachedFiles.filter(
+      (attachedFile) => attachedFile.kind === "image",
+    ).length;
 
-    reader.onload = () => {
-      const result = reader.result;
+    if (currentImageCount >= MAX_IMAGE_COUNT) {
+      setErrorText(`Mỗi tin nhắn chỉ được gửi tối đa ${MAX_IMAGE_COUNT} ảnh.`);
+      return;
+    }
 
-      if (typeof result !== "string") return;
+    if (!selectedModel?.supportsImage) {
+      setErrorText("AI hiện tại chưa hỗ trợ đọc ảnh.");
+      return;
+    }
+
+    try {
+      const dataUrl = await compressImageToDataUrl(file);
 
       setAttachedFiles((previousFiles) => [
         ...previousFiles,
         {
           id: crypto.randomUUID(),
           name: file.name || `pasted-image-${Date.now()}.png`,
-          type: file.type || "image/png",
+          type: "image/jpeg",
           size: file.size,
-          dataUrl: result,
+          dataUrl,
           kind: "image",
         },
       ]);
-    };
-
-    reader.readAsDataURL(file);
+      setErrorText("");
+    } catch (error) {
+      setErrorText(
+        error instanceof Error ? error.message : "Không thể xử lý ảnh.",
+      );
+    }
   }
 
   async function processAttachmentFiles(files: File[]) {
@@ -836,7 +849,7 @@ export default function ChatPage() {
       const lowerName = file.name.toLowerCase();
 
       if (file.type.startsWith("image/")) {
-        if (imageCount >= 2) {
+        if (imageCount >= MAX_IMAGE_COUNT) {
           continue;
         }
 
@@ -928,7 +941,11 @@ export default function ChatPage() {
       return;
     }
 
-    const availableSlots = Math.max(0, MAX_IMAGE_COUNT - attachedFiles.length);
+    const currentImageCount = attachedFiles.filter(
+      (file) => file.kind === "image",
+    ).length;
+
+    const availableSlots = Math.max(0, MAX_IMAGE_COUNT - currentImageCount);
 
     if (availableSlots === 0) {
       event.preventDefault();
@@ -942,7 +959,7 @@ export default function ChatPage() {
       const file = item.getAsFile();
 
       if (file) {
-        addImageFile(file);
+        void addImageFile(file);
       }
     });
   }
@@ -980,8 +997,20 @@ export default function ChatPage() {
       return;
     }
 
-    if (attachedFiles.length > 0 && !selectedModel?.supportsImage) {
+    const hasImageAttachments = attachedFiles.some(
+      (file) => file.kind === "image",
+    );
+    const hasFileAttachments = attachedFiles.some(
+      (file) => file.kind === "file",
+    );
+
+    if (hasImageAttachments && !selectedModel?.supportsImage) {
       setErrorText("AI đang chọn chưa hỗ trợ đọc ảnh.");
+      return;
+    }
+
+    if (hasFileAttachments && !selectedModel?.supportsFile) {
+      setErrorText("AI đang chọn chưa hỗ trợ đọc file.");
       return;
     }
 
@@ -989,8 +1018,10 @@ export default function ChatPage() {
       id: file.id,
       name: file.name,
       type: file.type,
-      kind: "file",
+      kind: file.kind,
+      size: file.size,
       dataUrl: file.dataUrl,
+      textContent: file.textContent,
     }));
 
     const userMessage: ChatMessage = {
@@ -1042,9 +1073,11 @@ export default function ChatPage() {
           modelId: selectedModelId,
           message:
             messageText ||
-            (messageAttachments.length > 0
-              ? "Hãy mô tả nội dung trong ảnh này."
-              : ""),
+            (messageAttachments.some((file) => file.kind === "image")
+              ? "Hãy phân tích ảnh được gửi kèm."
+              : messageAttachments.some((file) => file.kind === "file")
+                ? "Hãy đọc và xử lý tài liệu được gửi kèm."
+                : ""),
           attachments: messageAttachments.map((file) =>
             file.kind === "image"
               ? {
@@ -1217,13 +1250,22 @@ export default function ChatPage() {
         {attachedFiles.map((file) => (
           <div
             key={file.id}
-            className="group relative h-20 w-20 shrink-0 overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]"
+            className="group relative h-20 w-24 shrink-0 overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]"
           >
-            <img
-              src={file.dataUrl}
-              alt={file.name}
-              className="h-full w-full object-cover"
-            />
+            {file.kind === "image" && file.dataUrl ? (
+              <img
+                src={file.dataUrl}
+                alt={file.name}
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <div className="flex h-full w-full flex-col items-center justify-center px-2 text-center">
+                <span className="text-2xl">📄</span>
+                <span className="mt-1 line-clamp-2 text-[10px] leading-3 text-white/70">
+                  {file.name}
+                </span>
+              </div>
+            )}
 
             <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1 pt-5">
               <p className="truncate text-[10px] text-white/70">{file.name}</p>
@@ -1233,7 +1275,7 @@ export default function ChatPage() {
               type="button"
               onClick={() => removeAttachedFile(file.id)}
               className="absolute right-1.5 top-1.5 flex h-6 w-6 items-center justify-center rounded-full bg-black/70 text-sm text-white opacity-100 transition hover:bg-red-500 sm:opacity-0 sm:group-hover:opacity-100"
-              aria-label={`Xóa ảnh ${file.name}`}
+              aria-label={`Xóa tệp ${file.name}`}
             >
               ×
             </button>

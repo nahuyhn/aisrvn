@@ -560,16 +560,6 @@ export async function POST(req: Request) {
       body.attachments,
     );
 
-    console.log("ATTACHMENT_DEBUG:", {
-      rawAttachments: Array.isArray(body.attachments)
-        ? body.attachments.length
-        : 0,
-      imageCount: imageAttachments.length,
-      fileCount: fileAttachments.length,
-      firstImageLength: imageAttachments[0]?.dataUrl?.length || 0,
-      firstFileChars: fileAttachments[0]?.textContent?.length || 0,
-    });
-
     const attachmentError = validateAttachments({
       imageAttachments,
       fileAttachments,
@@ -789,20 +779,6 @@ export async function POST(req: Request) {
               content: userContent as string,
             },
           ];
-
-    console.log("AI_INPUT_DEBUG:", {
-      cleanMessage,
-      imageCount: imageAttachments.length,
-      fileCount: fileAttachments.length,
-      firstImageType: imageAttachments[0]?.type || "",
-      firstImageLength: imageAttachments[0]?.dataUrl?.length || 0,
-      firstFileName: fileAttachments[0]?.name || "",
-      firstFileChars: fileAttachments[0]?.textContent?.length || 0,
-      userContentPreview:
-        typeof userContent === "string"
-          ? userContent.slice(0, 500)
-          : JSON.stringify(userContent).slice(0, 500),
-    });
 
     const result = streamText({
       model: getAiModel(selectedModel),
