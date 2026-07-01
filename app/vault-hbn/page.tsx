@@ -97,6 +97,7 @@ export default async function AdminPage() {
     { label: "Doanh thu tổng", value: formatMoney(totalRevenue._sum.amount), href: "/vault-hbn/revenue" },
     { label: "Doanh thu hôm nay", value: formatMoney(todayRevenue._sum.amount), href: "/vault-hbn/revenue" },
     { label: "Quản lý gói", value: "Mở", href: "/vault-hbn/plans" },
+    { label: "Free AI Router", value: "Mở", href: "/vault-hbn/free-ai" },
   ];
 
   return (

@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
-import { createOrder } from "@/app/actions/order-actions";
+import { checkPendingOrder, createOrder } from "@/app/actions/order-actions";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getActiveSubscription } from "@/lib/subscription";
@@ -120,6 +120,7 @@ export default async function BillingPage({
       amount: true,
       status: true,
       paymentCode: true,
+      checkoutUrl: true,
       createdAt: true,
       paidAt: true,
       plan: {
@@ -360,7 +361,7 @@ export default async function BillingPage({
             </p>
           ) : (
             <div className="mt-6 overflow-x-auto rounded-xl border border-white/10">
-              <table className="w-full min-w-[850px] text-left text-sm">
+              <table className="w-full min-w-[980px] text-left text-sm">
                 <thead className="bg-white/10 text-white/70">
                   <tr>
                     <th className="p-4">Mã đơn</th>
@@ -369,6 +370,7 @@ export default async function BillingPage({
                     <th className="p-4">Trạng thái</th>
                     <th className="p-4">Ngày tạo</th>
                     <th className="p-4">Ngày thanh toán</th>
+                    <th className="p-4">Thao tác</th>
                   </tr>
                 </thead>
 
@@ -404,6 +406,38 @@ export default async function BillingPage({
 
                       <td className="whitespace-nowrap p-4">
                         {formatDate(order.paidAt)}
+                      </td>
+
+                      <td className="p-4">
+                        {order.status === "PENDING" ? (
+                          <div className="flex flex-wrap gap-2">
+                            <form action={checkPendingOrder}>
+                              <input
+                                type="hidden"
+                                name="orderId"
+                                value={order.id}
+                              />
+
+                              <button
+                                type="submit"
+                                className="rounded-lg border border-white/10 px-3 py-2 text-xs font-medium text-white/80 transition hover:bg-white/10 hover:text-white"
+                              >
+                                Kiểm tra lại
+                              </button>
+                            </form>
+
+                            {order.checkoutUrl && (
+                              <Link
+                                href={order.checkoutUrl}
+                                className="rounded-lg bg-white px-3 py-2 text-xs font-semibold text-black transition hover:bg-white/85"
+                              >
+                                Thanh toán
+                              </Link>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-white/30">—</span>
+                        )}
                       </td>
                     </tr>
                   ))}

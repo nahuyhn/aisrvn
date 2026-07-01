@@ -1,44 +1,46 @@
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import {
+  getAccessibleModelsForUser,
+  toPublicAiModel,
+} from "@/lib/model-access";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const model = await prisma.modelConfig.findFirst({
-      where: {
-        isActive: true,
-        isFree: true,
-      },
-      select: {
-        id: true,
-        displayName: true,
-        description: true,
-        category: true,
-        supportsImage: true,
-        supportsFile: true,
-        isFree: true,
-        sortOrder: true,
-      },
-      orderBy: [
-        {
-          sortOrder: "asc",
+    const session = await getServerSession(authOptions);
+
+    let userId: string | null = null;
+
+    if (session?.user?.email) {
+      const user = await prisma.user.findUnique({
+        where: {
+          email: session.user.email,
         },
-        {
-          displayName: "asc",
+        select: {
+          id: true,
+          status: true,
         },
-      ],
-    });
+      });
+
+      if (user?.status === "BANNED") {
+        return Response.json(
+          {
+            error: "Tài khoản của bạn đã bị khóa.",
+          },
+          { status: 403 },
+        );
+      }
+
+      userId = user?.id || null;
+    }
+
+    const models = await getAccessibleModelsForUser(userId);
 
     return Response.json({
-      models: model
-        ? [
-            {
-              ...model,
-              displayName: "AI SITIKI",
-              description: "Trợ lý AI của AI SITIKI.",
-            },
-          ]
-        : [],
+      models: models.map(toPublicAiModel),
     });
   } catch (error) {
     console.error("GET_MODELS_ERROR:", error);
@@ -50,7 +52,7 @@ export async function GET() {
             ? error.message
             : "Không tải được AI.",
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

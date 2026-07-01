@@ -1,9 +1,12 @@
-import { streamText } from "ai";
-import { google } from "@ai-sdk/google";
-import { openai } from "@ai-sdk/openai";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import {
+  getSelectedAccessibleModel,
+  ModelAccessError,
+  type AccessibleModel,
+} from "@/lib/model-access";
+import { streamTextWithAiRouter } from "@/lib/ai-router";
 
 export const dynamic = "force-dynamic";
 
@@ -23,17 +26,6 @@ type ChatAttachment = {
   kind: "image" | "file";
   dataUrl?: string;
   textContent?: string;
-};
-
-type SelectedModel = {
-  id: string;
-  provider: string;
-  model: string;
-  displayName: string;
-  category: string;
-  isFree: boolean;
-  supportsImage: boolean;
-  supportsFile: boolean;
 };
 
 type CurrentChatSession = {
@@ -198,20 +190,6 @@ function createTitle(message: string) {
   return clean.slice(0, 36).trim() + "...";
 }
 
-function getAiModel(selectedModel: SelectedModel) {
-  const provider = selectedModel.provider.toLowerCase().trim();
-
-  if (provider === "google") {
-    return google(selectedModel.model);
-  }
-
-  if (provider === "openai") {
-    return openai(selectedModel.model);
-  }
-
-  throw new Error(`Provider AI chưa được hỗ trợ: ${selectedModel.provider}`);
-}
-
 function getTodayStart() {
   const now = new Date();
 
@@ -318,63 +296,6 @@ async function checkUserDailyLimit(userId: string) {
   };
 }
 
-async function getSelectedModel(modelId: string | null) {
-  let selectedModel: SelectedModel | null = null;
-
-  if (modelId) {
-    selectedModel = await prisma.modelConfig.findFirst({
-      where: {
-        id: modelId,
-        isActive: true,
-        isFree: true,
-      },
-      select: {
-        id: true,
-        provider: true,
-        model: true,
-        displayName: true,
-        category: true,
-        isFree: true,
-        supportsImage: true,
-        supportsFile: true,
-      },
-    });
-  }
-
-  if (!selectedModel) {
-    selectedModel = await prisma.modelConfig.findFirst({
-      where: {
-        isActive: true,
-        isFree: true,
-      },
-      orderBy: [
-        {
-          sortOrder: "asc",
-        },
-        {
-          displayName: "asc",
-        },
-      ],
-      select: {
-        id: true,
-        provider: true,
-        model: true,
-        displayName: true,
-        category: true,
-        isFree: true,
-        supportsImage: true,
-        supportsFile: true,
-      },
-    });
-  }
-
-  if (!selectedModel) {
-    throw new Error("Chưa có AI miễn phí nào đang hoạt động.");
-  }
-
-  return selectedModel;
-}
-
 function parseAttachments(bodyAttachments: unknown) {
   const attachments: ChatAttachment[] = Array.isArray(bodyAttachments)
     ? bodyAttachments
@@ -477,7 +398,7 @@ Không được nói rằng bạn không thể xem ảnh.`
 function validateAttachments(params: {
   imageAttachments: ChatAttachment[];
   fileAttachments: ChatAttachment[];
-  selectedModel: SelectedModel;
+  selectedModel: AccessibleModel;
 }) {
   const { imageAttachments, fileAttachments, selectedModel } = params;
 
@@ -554,7 +475,29 @@ export async function POST(req: Request) {
       );
     }
 
-    const selectedModel = await getSelectedModel(modelId);
+    const user = await getCurrentUser();
+
+    if (user?.status === "BANNED") {
+      return Response.json(
+        { error: "Tài khoản của bạn đã bị khóa." },
+        { status: 403 },
+      );
+    }
+
+    let selectedModel: AccessibleModel;
+
+    try {
+      selectedModel = await getSelectedAccessibleModel(user?.id || null, modelId);
+    } catch (error) {
+      if (error instanceof ModelAccessError) {
+        return Response.json(
+          { error: error.message },
+          { status: error.status },
+        );
+      }
+
+      throw error;
+    }
 
     const { imageAttachments, fileAttachments } = parseAttachments(
       body.attachments,
@@ -575,15 +518,6 @@ export async function POST(req: Request) {
       imageAttachments,
       fileAttachments,
     });
-
-    const user = await getCurrentUser();
-
-    if (user?.status === "BANNED") {
-      return Response.json(
-        { error: "Tài khoản của bạn đã bị khóa." },
-        { status: 403 },
-      );
-    }
 
     if (!user) {
       if (cleanMessage.length > GUEST_MAX_MESSAGE_LENGTH) {
@@ -617,29 +551,30 @@ export async function POST(req: Request) {
         );
       }
 
-      const result = streamText({
-        model: getAiModel(selectedModel),
-        maxOutputTokens: getOutputBudget(cleanMessage, false),
-        messages: [
-          {
-            role: "system",
-            content: SYSTEM_PROMPT,
-          },
-          {
-            role: "user",
-            content: cleanMessage,
-          },
-        ],
-      });
-
       const encoder = new TextEncoder();
 
       return new Response(
         new ReadableStream({
           async start(controller) {
             try {
-              for await (const textDelta of result.textStream) {
-                controller.enqueue(encoder.encode(textDelta));
+              for await (const event of streamTextWithAiRouter({
+                selectedModel,
+                maxOutputTokens: getOutputBudget(cleanMessage, false),
+                requiresVision: false,
+                messages: [
+                  {
+                    role: "system",
+                    content: SYSTEM_PROMPT,
+                  },
+                  {
+                    role: "user",
+                    content: cleanMessage,
+                  },
+                ],
+              })) {
+                if (event.type === "delta") {
+                  controller.enqueue(encoder.encode(event.textDelta));
+                }
               }
 
               controller.close();
@@ -780,15 +715,6 @@ export async function POST(req: Request) {
             },
           ];
 
-    const result = streamText({
-      model: getAiModel(selectedModel),
-      maxOutputTokens: getOutputBudget(
-        cleanMessage,
-        selectedModel.isFree === false,
-      ),
-      messages: messagesForAi,
-    });
-
     const encoder = new TextEncoder();
     const currentSessionId = chatSession.id;
     const currentSessionTitle = chatSession.title;
@@ -798,11 +724,28 @@ export async function POST(req: Request) {
       new ReadableStream({
         async start(controller) {
           let fullText = "";
+          let actualProvider = selectedModel.provider;
+          let actualModel = selectedModel.model;
 
           try {
-            for await (const textDelta of result.textStream) {
-              fullText += textDelta;
-              controller.enqueue(encoder.encode(textDelta));
+            for await (const event of streamTextWithAiRouter({
+              selectedModel,
+              maxOutputTokens: getOutputBudget(
+                cleanMessage,
+                selectedModel.isFree === false,
+              ),
+              requiresVision: imageAttachments.length > 0,
+              messages: messagesForAi as any,
+            })) {
+              if (event.type === "delta") {
+                fullText += event.textDelta;
+                controller.enqueue(encoder.encode(event.textDelta));
+              }
+
+              if (event.type === "finish") {
+                actualProvider = event.provider;
+                actualModel = event.model;
+              }
             }
 
             await prisma.chatMessage.create({
@@ -825,8 +768,8 @@ export async function POST(req: Request) {
             await prisma.usageLog.create({
               data: {
                 userId: user.id,
-                provider: selectedModel.provider,
-                model: selectedModel.model,
+                provider: actualProvider,
+                model: actualModel,
                 inputTextLength: cleanMessage.length,
                 outputTextLength: fullText.length,
               },

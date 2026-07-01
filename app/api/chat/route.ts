@@ -1,9 +1,13 @@
-import { generateText } from "ai";
-import { google } from "@ai-sdk/google";
-import { openai } from "@ai-sdk/openai";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import {
+  getSelectedAccessibleModel,
+  ModelAccessError,
+  toPublicAiModel,
+  type AccessibleModel,
+} from "@/lib/model-access";
+import { generateTextWithAiRouter } from "@/lib/ai-router";
 
 export const dynamic = "force-dynamic";
 
@@ -20,18 +24,9 @@ type AiMessage = {
 type ChatAttachment = {
   name: string;
   type: string;
-  dataUrl: string;
-};
-
-type SelectedModel = {
-  id: string;
-  provider: string;
-  model: string;
-  displayName: string;
-  category: string;
-  isFree: boolean;
-  supportsImage: boolean;
-  supportsFile: boolean;
+  kind?: "image" | "file";
+  dataUrl?: string;
+  textContent?: string;
 };
 
 type CurrentChatSession = {
@@ -46,8 +41,11 @@ const GUEST_DAILY_LIMIT_PER_IP = 3;
 const FREE_USER_DAILY_LIMIT = 20;
 const GUEST_MAX_MESSAGE_LENGTH = 800;
 const USER_MAX_MESSAGE_LENGTH = 4000;
-const MAX_ATTACHMENTS = 2;
-const MAX_DATA_URL_LENGTH = 2_000_000;
+
+const MAX_IMAGE_ATTACHMENTS = 2;
+const MAX_FILE_ATTACHMENTS = 1;
+const MAX_IMAGE_DATA_URL_LENGTH = 4_000_000;
+const MAX_FILE_TEXT_CHARS = 12_000;
 
 const SYSTEM_PROMPT = `
 Bạn là AI SITIKI, trợ lý AI tiếng Việt.
@@ -190,8 +188,10 @@ function createTitle(message: string) {
   if (!clean) return "Cuộc trò chuyện mới";
 
   const separators = [".", "?", "!", "\n"];
+
   for (const sep of separators) {
     const index = clean.indexOf(sep);
+
     if (index > 8) {
       clean = clean.slice(0, index);
       break;
@@ -201,31 +201,6 @@ function createTitle(message: string) {
   if (clean.length <= 36) return clean;
 
   return clean.slice(0, 36).trim() + "...";
-}
-
-function getAiModel(selectedModel: SelectedModel) {
-  const provider = selectedModel.provider.toLowerCase().trim();
-
-  if (provider === "google") {
-    return google(selectedModel.model);
-  }
-
-  if (provider === "openai") {
-    return openai(selectedModel.model);
-  }
-
-  throw new Error(`Provider AI chưa được hỗ trợ: ${selectedModel.provider}`);
-}
-
-function toPublicModel(selectedModel: SelectedModel) {
-  return {
-    id: selectedModel.id,
-    displayName: selectedModel.displayName,
-    category: selectedModel.category,
-    isFree: selectedModel.isFree,
-    supportsImage: selectedModel.supportsImage,
-    supportsFile: selectedModel.supportsFile,
-  };
 }
 
 function getTodayStart() {
@@ -334,68 +309,160 @@ async function checkUserDailyLimit(userId: string) {
   };
 }
 
-async function getSelectedModel(modelId: string | null) {
-  let selectedModel: SelectedModel | null = null;
+function parseAttachments(bodyAttachments: unknown) {
+  const attachments: ChatAttachment[] = Array.isArray(bodyAttachments)
+    ? bodyAttachments
+        .filter(
+          (file: ChatAttachment) =>
+            typeof file.name === "string" &&
+            typeof file.type === "string" &&
+            (file.kind === "image" || file.kind === "file" || !file.kind),
+        )
+        .slice(0, MAX_IMAGE_ATTACHMENTS + MAX_FILE_ATTACHMENTS)
+    : [];
 
-  if (modelId) {
-    selectedModel = await prisma.modelConfig.findFirst({
-      where: {
-        id: modelId,
-        isActive: true,
-        isFree: true,
-      },
-      select: {
-        id: true,
-        provider: true,
-        model: true,
-        displayName: true,
-        category: true,
-        isFree: true,
-        supportsImage: true,
-        supportsFile: true,
-      },
-    });
+  const imageAttachments = attachments
+    .filter(
+      (file) =>
+        (file.kind === "image" || !file.kind) &&
+        typeof file.dataUrl === "string" &&
+        file.type.startsWith("image/"),
+    )
+    .slice(0, MAX_IMAGE_ATTACHMENTS);
+
+  const fileAttachments = attachments
+    .filter(
+      (file) => file.kind === "file" && typeof file.textContent === "string",
+    )
+    .slice(0, MAX_FILE_ATTACHMENTS);
+
+  return {
+    imageAttachments,
+    fileAttachments,
+  };
+}
+
+function buildUserContent(params: {
+  cleanMessage: string;
+  imageAttachments: ChatAttachment[];
+  fileAttachments: ChatAttachment[];
+}) {
+  const { cleanMessage, imageAttachments, fileAttachments } = params;
+
+  const fileContext =
+    fileAttachments.length > 0
+      ? fileAttachments
+          .map((file, index) => {
+            const text = truncateText(
+              (file.textContent || "").trim(),
+              MAX_FILE_TEXT_CHARS,
+            );
+
+            return `TÀI LIỆU ĐÍNH KÈM ${index + 1}
+Tên file: ${file.name}
+
+NỘI DUNG ĐÃ TRÍCH XUẤT:
+${text}`;
+          })
+          .join("\n\n====================\n\n")
+      : "";
+
+  const basePrompt =
+    cleanMessage ||
+    (imageAttachments.length > 0
+      ? "Hãy phân tích ảnh được gửi kèm."
+      : "Hãy đọc và xử lý tài liệu được gửi kèm.");
+
+  const textPrompt = fileContext
+    ? `${basePrompt}
+
+Lưu ý quan trọng:
+Người dùng đã gửi file. Nội dung file đã được hệ thống trích xuất bên dưới.
+Bạn phải đọc phần NỘI DUNG ĐÃ TRÍCH XUẤT để trả lời.
+Không được nói rằng bạn không thể truy cập file.
+
+${fileContext}`
+    : imageAttachments.length > 0
+      ? `${basePrompt}
+
+Lưu ý quan trọng:
+Người dùng đã gửi ảnh trực tiếp trong request này.
+Bạn phải phân tích ảnh được gửi kèm.
+Không được nói rằng bạn không thể xem ảnh.`
+      : basePrompt;
+
+  if (imageAttachments.length === 0) {
+    return textPrompt;
   }
 
-  if (!selectedModel) {
-    selectedModel = await prisma.modelConfig.findFirst({
-      where: {
-        isActive: true,
-        isFree: true,
-      },
-      orderBy: [
+  return [
+    {
+      type: "text" as const,
+      text: textPrompt,
+    },
+    ...imageAttachments.map((file) => ({
+      type: "image" as const,
+      image: file.dataUrl!,
+      mediaType: file.type || "image/jpeg",
+    })),
+  ];
+}
+
+function validateAttachments(params: {
+  imageAttachments: ChatAttachment[];
+  fileAttachments: ChatAttachment[];
+  selectedModel: AccessibleModel;
+}) {
+  const { imageAttachments, fileAttachments, selectedModel } = params;
+
+  for (const file of imageAttachments) {
+    if ((file.dataUrl || "").length > MAX_IMAGE_DATA_URL_LENGTH) {
+      return Response.json(
         {
-          sortOrder: "asc",
+          error: "Ảnh quá lớn. Vui lòng gửi ảnh nhẹ hơn để giảm chi phí xử lý.",
         },
+        { status: 400 },
+      );
+    }
+  }
+
+  for (const file of fileAttachments) {
+    if ((file.textContent || "").length > MAX_FILE_TEXT_CHARS) {
+      return Response.json(
         {
-          displayName: "asc",
+          error: "Nội dung file quá dài. Vui lòng rút gọn file.",
         },
-      ],
-      select: {
-        id: true,
-        provider: true,
-        model: true,
-        displayName: true,
-        category: true,
-        isFree: true,
-        supportsImage: true,
-        supportsFile: true,
+        { status: 400 },
+      );
+    }
+  }
+
+  if (imageAttachments.length > 0 && !selectedModel.supportsImage) {
+    return Response.json(
+      {
+        error: `AI ${selectedModel.displayName} hiện chưa hỗ trợ hình ảnh.`,
       },
-    });
+      { status: 400 },
+    );
   }
 
-  if (!selectedModel) {
-    throw new Error("Chưa có AI miễn phí nào đang hoạt động.");
+  if (fileAttachments.length > 0 && !selectedModel.supportsFile) {
+    return Response.json(
+      {
+        error: `AI ${selectedModel.displayName} hiện chưa hỗ trợ tệp đính kèm.`,
+      },
+      { status: 400 },
+    );
   }
 
-  return selectedModel;
+  return null;
 }
 
 async function maybeUpdateChatSummary(params: {
   sessionId: string;
   currentSummary: string | null;
   summaryMessageCount: number;
-  selectedModel: SelectedModel;
+  selectedModel: AccessibleModel;
 }) {
   const { sessionId, currentSummary, summaryMessageCount, selectedModel } =
     params;
@@ -465,9 +532,10 @@ async function maybeUpdateChatSummary(params: {
     })
     .join("\n\n");
 
-  const result = await generateText({
-    model: getAiModel(selectedModel),
+  const result = await generateTextWithAiRouter({
+    selectedModel,
     maxOutputTokens: 500,
+    requiresVision: false,
     messages: [
       {
         role: "system",
@@ -513,18 +581,6 @@ export async function POST(req: Request) {
 
     const message = body.message;
 
-    const attachments: ChatAttachment[] = Array.isArray(body.attachments)
-      ? body.attachments
-          .filter(
-            (file: ChatAttachment) =>
-              typeof file.name === "string" &&
-              typeof file.type === "string" &&
-              typeof file.dataUrl === "string" &&
-              file.type.startsWith("image/"),
-          )
-          .slice(0, MAX_ATTACHMENTS)
-      : [];
-
     if (!message || typeof message !== "string") {
       return Response.json(
         { error: "Tin nhắn không hợp lệ." },
@@ -541,43 +597,6 @@ export async function POST(req: Request) {
       );
     }
 
-    for (const file of attachments) {
-      if (file.dataUrl.length > MAX_DATA_URL_LENGTH) {
-        return Response.json(
-          {
-            error:
-              "Ảnh quá lớn. Vui lòng gửi ảnh nhẹ hơn để giảm chi phí xử lý.",
-          },
-          { status: 400 },
-        );
-      }
-    }
-
-    const selectedModel = await getSelectedModel(modelId);
-
-    if (attachments.length > 0 && !selectedModel.supportsImage) {
-      return Response.json(
-        {
-          error: `AI ${selectedModel.displayName} hiện chưa hỗ trợ hình ảnh.`,
-        },
-        { status: 400 },
-      );
-    }
-
-    const userContent =
-      attachments.length > 0
-        ? [
-            {
-              type: "text" as const,
-              text: cleanMessage,
-            },
-            ...attachments.map((file) => ({
-              type: "image" as const,
-              image: file.dataUrl,
-            })),
-          ]
-        : cleanMessage;
-
     const user = await getCurrentUser();
 
     if (user?.status === "BANNED") {
@@ -586,6 +605,41 @@ export async function POST(req: Request) {
         { status: 403 },
       );
     }
+
+    let selectedModel: AccessibleModel;
+
+    try {
+      selectedModel = await getSelectedAccessibleModel(user?.id || null, modelId);
+    } catch (error) {
+      if (error instanceof ModelAccessError) {
+        return Response.json(
+          { error: error.message },
+          { status: error.status },
+        );
+      }
+
+      throw error;
+    }
+
+    const { imageAttachments, fileAttachments } = parseAttachments(
+      body.attachments,
+    );
+
+    const attachmentError = validateAttachments({
+      imageAttachments,
+      fileAttachments,
+      selectedModel,
+    });
+
+    if (attachmentError) {
+      return attachmentError;
+    }
+
+    const userContent = buildUserContent({
+      cleanMessage,
+      imageAttachments,
+      fileAttachments,
+    });
 
     if (!user) {
       if (cleanMessage.length > GUEST_MAX_MESSAGE_LENGTH) {
@@ -597,11 +651,11 @@ export async function POST(req: Request) {
         );
       }
 
-      if (attachments.length > 0) {
+      if (imageAttachments.length > 0 || fileAttachments.length > 0) {
         return Response.json(
           {
             error:
-              "Khách dùng thử chưa được gửi ảnh. Vui lòng đăng nhập hoặc nâng cấp gói.",
+              "Khách dùng thử chưa được gửi ảnh hoặc file. Vui lòng đăng nhập để sử dụng.",
           },
           { status: 403 },
         );
@@ -619,9 +673,10 @@ export async function POST(req: Request) {
         );
       }
 
-      const result = await generateText({
-        model: getAiModel(selectedModel),
+      const result = await generateTextWithAiRouter({
+        selectedModel,
         maxOutputTokens: getOutputBudget(cleanMessage, false),
+        requiresVision: false,
         messages: [
           {
             role: "system",
@@ -640,7 +695,7 @@ export async function POST(req: Request) {
         answer: result.text,
         isGuest: true,
         remainingGuestMessages: guestLimit.remaining,
-        model: toPublicModel(selectedModel),
+        model: toPublicAiModel(selectedModel),
       });
     }
 
@@ -745,25 +800,34 @@ export async function POST(req: Request) {
 
     const aiMessages = optimizeHistoryForAi(history, chatSession.summary);
 
-    const result = await generateText({
-      model: getAiModel(selectedModel),
+    const messagesForAi: any[] =
+      imageAttachments.length > 0
+        ? [
+            {
+              role: "system" as const,
+              content: SYSTEM_PROMPT,
+            },
+            {
+              role: "user" as const,
+              content: userContent,
+            },
+          ]
+        : [
+            ...aiMessages,
+            {
+              role: "user" as const,
+              content: userContent as string,
+            },
+          ];
+
+    const result = await generateTextWithAiRouter({
+      selectedModel,
       maxOutputTokens: getOutputBudget(
         cleanMessage,
         selectedModel.isFree === false,
       ),
-      messages:
-        attachments.length > 0
-          ? [
-              {
-                role: "system",
-                content: SYSTEM_PROMPT,
-              },
-              {
-                role: "user",
-                content: userContent as any,
-              },
-            ]
-          : aiMessages,
+      requiresVision: imageAttachments.length > 0,
+      messages: messagesForAi as any,
     });
 
     const assistantMessage = await prisma.chatMessage.create({
@@ -796,10 +860,10 @@ export async function POST(req: Request) {
     await prisma.usageLog.create({
       data: {
         userId: user.id,
-        provider: selectedModel.provider,
-        model: selectedModel.model,
-        inputTextLength: result.usage?.inputTokens ?? cleanMessage.length,
-        outputTextLength: result.usage?.outputTokens ?? result.text.length,
+        provider: result.provider,
+        model: result.model,
+        inputTextLength: cleanMessage.length,
+        outputTextLength: result.text.length,
       },
     });
 
@@ -820,7 +884,7 @@ export async function POST(req: Request) {
         limit: dailyLimit.limit,
         remaining: Math.max(0, dailyLimit.remaining - 1),
       },
-      model: toPublicModel(selectedModel),
+      model: toPublicAiModel(selectedModel),
     });
   } catch (error) {
     console.error("CHAT_API_ERROR:", error);

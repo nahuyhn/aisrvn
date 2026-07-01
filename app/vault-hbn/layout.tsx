@@ -68,6 +68,21 @@ export default async function AdminLayout({
           </Link>
 
           <Link
+            href="/vault-hbn/free-ai"
+            className="block rounded-xl px-4 py-3 text-sm text-white/70 hover:bg-white/10 hover:text-white"
+          >
+            Free AI
+          </Link>
+
+
+          <Link
+            href="/vault-hbn/maintenance"
+            className="block rounded-xl px-4 py-3 text-sm text-white/70 hover:bg-white/10 hover:text-white"
+          >
+            Bảo trì
+          </Link>
+
+          <Link
             href="/chat"
             className="mt-6 block rounded-xl px-4 py-3 text-sm text-white/40 hover:bg-white/10 hover:text-white"
           >
